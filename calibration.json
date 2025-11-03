@@ -1,0 +1,26 @@
+{
+  "Gantry": {
+    "mm_per_tick": 0.025479452054794523,
+    "top_mm": 9.3
+  },
+  "LVDT": {
+    "hysteresis": "0.000",
+    "intercept": 0.7341613855951735,
+    "non_linearity": "0.007",
+    "repeatability": null,
+    "slope": 2.0114075151983926
+  },
+  "Weights": {
+    "mm_per_tick": 0.07592182246175333,
+    "top_mm": 22.776546738526
+  },
+  "meta": {
+    "notes": "Auto-saved from GUI calibration",
+    "ts": "2025-09-26 01:46:09"
+  },
+  "weights_encoder": {
+    "bottom_counts": 0,
+    "tolerance_counts": 20,
+    "top_counts": 277
+  }
+}

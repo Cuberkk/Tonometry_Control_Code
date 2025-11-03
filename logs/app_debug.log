@@ -1,0 +1,74 @@
+20:12:34.119 INFO [MainThread] Starting Flet app on http://0.0.0.0:8550  (open this in your browser)
+20:12:34.119 INFO [MainThread] Logs: logs/app_debug.log
+20:12:34.122 INFO [MainThread] Assets path configured: /home/erie/Tonometry/assets
+20:12:35.485 INFO [MainThread] Starting Flet web server on port 8550...
+20:12:35.490 INFO [MainThread] Web renderer configured: WebRenderer.CANVAS_KIT
+20:12:35.490 INFO [MainThread] Use color emoji: False
+20:12:35.491 INFO [MainThread] Route URL strategy configured: path
+20:12:35.569 INFO [MainThread] Starting up Flet App Manager
+20:12:35.570 INFO [MainThread] App URL: http://0.0.0.0:8550
+20:12:42.599 INFO [MainThread] Temp dir created for patched index and manifest: /tmp/tmpzq6pl269
+20:12:42.601 INFO [MainThread] Web root: /home/erie/anaconda3/envs/tonometry/lib/python3.10/site-packages/flet_web/web
+20:12:42.603 INFO [MainThread] assets_dir does not exist: /home/erie/Tonometry/assets
+20:12:42.604 INFO [MainThread] Assets dir: None
+20:12:45.296 INFO [MainThread] New FletApp: XxvcLWiP
+20:12:45.409 INFO [MainThread] New session created (1 total): _F7L7pH0xPUw1eRIJ_205dc1f269d59167db597efc893434d1afcbc4c7
+20:12:45.412 INFO [MainThread] Start session: F7L7pH0xPUw1eRIJ
+20:12:45.414 INFO [flet_fastapi_0] Flet main() starting
+20:12:45.415 INFO [flet_fastapi_0] Flet page created
+20:12:45.416 INFO [flet_fastapi_0] Initializing Motoron @0x10 on I2C bus 1
+20:12:45.430 INFO [flet_fastapi_0] Motoron init OK
+20:12:45.432 INFO [ADCReader] ADCReader started (channel A1)
+20:13:34.984 INFO [MainThread] Session disconnected: _F7L7pH0xPUw1eRIJ_205dc1f269d59167db597efc893434d1afcbc4c7
+20:13:36.774 INFO [MainThread] Shutting down Flet App Manager
+20:13:36.775 INFO [MainThread] Deleting temp dir: /tmp/tmpzq6pl269
+20:13:36.781 INFO [MainThread] Flet app has started...
+20:13:36.783 INFO [MainThread] Closing Flet web server...
+20:17:52.280 INFO [MainThread] Starting Flet app on http://0.0.0.0:8550  (open this in your browser)
+20:17:52.280 INFO [MainThread] Logs: logs/app_debug.log
+20:17:52.283 INFO [MainThread] Assets path configured: /home/erie/Tonometry/assets
+20:17:53.647 INFO [MainThread] Starting Flet web server on port 8550...
+20:17:53.651 INFO [MainThread] Web renderer configured: WebRenderer.CANVAS_KIT
+20:17:53.652 INFO [MainThread] Use color emoji: False
+20:17:53.652 INFO [MainThread] Route URL strategy configured: path
+20:17:53.730 INFO [MainThread] Starting up Flet App Manager
+20:17:53.731 INFO [MainThread] App URL: http://0.0.0.0:8550
+20:17:59.519 INFO [MainThread] Temp dir created for patched index and manifest: /tmp/tmp8xipgkti
+20:17:59.521 INFO [MainThread] Web root: /home/erie/anaconda3/envs/tonometry/lib/python3.10/site-packages/flet_web/web
+20:17:59.523 INFO [MainThread] assets_dir does not exist: /home/erie/Tonometry/assets
+20:17:59.524 INFO [MainThread] Assets dir: None
+20:18:01.097 INFO [MainThread] New FletApp: YLbUovJJ
+20:18:01.170 INFO [MainThread] New session created (1 total): _JSnKaiQ91XOjcnje_205dc1f269d59167db597efc893434d1afcbc4c7
+20:18:01.172 INFO [MainThread] Start session: JSnKaiQ91XOjcnje
+20:18:01.176 INFO [flet_fastapi_0] Flet main() starting
+20:18:01.179 INFO [flet_fastapi_0] Flet page created
+20:18:01.180 INFO [flet_fastapi_0] Initializing Motoron @0x10 on I2C bus 1
+20:18:01.198 INFO [flet_fastapi_0] Motoron init OK
+20:18:01.201 INFO [ADCReader] ADCReader started (channel A1)
+20:18:01.228 INFO [flet_fastapi_0] UI constructed.
+20:18:01.229 INFO [flet_fastapi_0] Heartbeat started.
+20:18:05.126 INFO [flet_fastapi_0] Weights speed% -> 36.6
+20:18:05.592 INFO [flet_fastapi_0] Weights speed% -> 100.0
+20:18:06.151 INFO [flet_fastapi_0] Weights speed% -> 87.9
+20:18:22.319 ERROR [MainThread] Future exception was never retrieved
+future: <Future finished exception=AttributeError("'Page' object has no attribute 'call_from_thread'")>
+Traceback (most recent call last):
+  File "/home/erie/Tonometry/test.py", line 449, in start_sequence
+    self.ui(lambda: self._set_text(self.lbl_log, f"Log: {path}"))
+  File "/home/erie/Tonometry/test.py", line 342, in ui
+    self.page.call_from_thread(fn)
+AttributeError: 'Page' object has no attribute 'call_from_thread'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/erie/anaconda3/envs/tonometry/lib/python3.10/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/home/erie/anaconda3/envs/tonometry/lib/python3.10/site-packages/flet/core/page.py", line 906, in wrapper
+    handler(*args)
+  File "/home/erie/Tonometry/test.py", line 452, in start_sequence
+    self.ui(lambda: self._set_text(self.lbl_status, f"Log open failed: {e}"))
+  File "/home/erie/Tonometry/test.py", line 342, in ui
+    self.page.call_from_thread(fn)
+AttributeError: 'Page' object has no attribute 'call_from_thread'
+20:18:30.535 INFO [MainThread] Session disconnected: _JSnKaiQ91XOjcnje_205dc1f269d59167db597efc893434d1afcbc4c7
