@@ -20,7 +20,17 @@
   },
   "weights_encoder": {
     "bottom_counts": 0,
+    "slow_min_scale": 0.95,
+    "slow_zone_counts": 30,
+    "slow_zone_torque_floor": 300,
     "tolerance_counts": 20,
-    "top_counts": 277
+    "top_counts": 266
+  },
+  "weights_pid": {
+    "deadband_counts": 8,
+    "kd": 0.402077469912965,
+    "ki": 0.0,
+    "kp": 9.155879872252855,
+    "min_output": 400.0
   }
 }
