@@ -5,7 +5,7 @@ After plugging in the Ethernet cable, open a terminal and run the following comm
 ```
 ssh -Y erie@192.168.100.1
 ```
-After entering the user password we shared with you, you will be able connect to the raspberry pi.
+After entering the user password we provided, you will be able to connect to the Raspberry Pi.
 
 To launch the Tonometry control GUI, run the following command:
 ```
