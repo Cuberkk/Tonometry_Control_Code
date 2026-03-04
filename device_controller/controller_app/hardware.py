@@ -85,7 +85,7 @@ class QuadratureEncoder:
             self._pi.set_mode(pin, pigpio.INPUT)
             self._pi.set_pull_up_down(pin, pigpio.PUD_UP)
 
-        glitch_us = 200   # use 100 us
+        glitch_us = 175   # use 100 us
         self._pi.set_glitch_filter(self.gpio_a, glitch_us)
         self._pi.set_glitch_filter(self.gpio_b, glitch_us)
 

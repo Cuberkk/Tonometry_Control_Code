@@ -106,7 +106,7 @@ WEIGHTS_SLOW_TORQUE_FLOOR = max(20, _load_weight_default("slow_zone_torque_floor
 WEIGHTS_BOTTOM_SLOW_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("bottom_slow_speed_pct", 10.0)))
 WEIGHTS_BOTTOM_RETENSION_COUNTS = max(0, _load_weight_default("bottom_retension_counts", 10))
 WEIGHTS_BOTTOM_RETENSION_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("bottom_retension_speed_pct", 20.0)))
-PID_LIFT_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("pid_lift_speed_pct", 41.5)))
+PID_LIFT_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("pid_lift_speed_pct", 40.5)))
 
 LVDT_SLOPE = calibration_data.get("LVDT", {}).get("slope", 2.0114)
 LVDT_INTERCEPT = calibration_data.get("LVDT", {}).get("intercept", 0.7342)
