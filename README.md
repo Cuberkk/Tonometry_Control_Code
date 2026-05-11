@@ -63,5 +63,3 @@ Key settings:
   - `bottom_slow_speed_pct`: temporary speed when driving to bottom.
   - `bottom_retension_counts`: lift after hitting bottom (0 to disable).
   - `bottom_retension_speed_pct`: speed for that lift.
-
-This is a test
