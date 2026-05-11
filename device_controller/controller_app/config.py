@@ -98,7 +98,7 @@ if _span <= 0 or _span > WEIGHTS_TRAVEL_DEFAULT * 4:
     else:
         WEIGHTS_TOP_DEFAULT = WEIGHTS_BOTTOM_DEFAULT - WEIGHTS_TRAVEL_DEFAULT
 
-WEIGHTS_TOP_DEFAULT = 270
+WEIGHTS_TOP_DEFAULT = 310
 WEIGHTS_SLOW_ZONE_COUNTS = max(1, _load_weight_default("slow_zone_counts", 400))
 WEIGHTS_SLOW_MIN_SCALE = max(0.05, min(1.0, _load_weight_float("slow_zone_scale", 0.25)))
 WEIGHTS_SLOW_TORQUE_FLOOR = max(20, _load_weight_default("slow_zone_torque_floor", 80))
