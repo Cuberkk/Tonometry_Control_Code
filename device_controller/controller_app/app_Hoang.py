@@ -824,7 +824,7 @@ class ControllerApp(tk.Tk):
             self._recording_thread = None
 
         self._set_sequence_status("Stopping sequence...")
-        self.lbl_status.config(text="Sequence stopped — press Save data to export.")
+        self.lbl_status.config(text="Stopping sequence…")
         self._update_sequence_controls()
         self._update_weights_controls_state()
 
@@ -894,11 +894,22 @@ class ControllerApp(tk.Tk):
 
         if success and completed == requested:
             msg = f"Sequence complete ({completed} cycles)"
-            self.lbl_status.config(text="Sequence complete — press Save data to export.")
+            status_txt = "Sequence complete — press Save data to export."
         else:
             msg = f"Sequence stopped ({completed}/{requested} cycles)"
-            self.lbl_status.config(text="Sequence stopped — press Save data to export.")
+            status_txt = "Sequence stopped — press Save data to export."
 
+        # Enable the Save button now that recording has finished
+        has_data = bool(self._recording_data_buffer)
+        btn_save = getattr(self, "btn_seq_save", None)
+        if btn_save is not None:
+            btn_save.config(state=tk.NORMAL if has_data else tk.DISABLED)
+        if has_data:
+            n = len(self._recording_data_buffer)
+            print(f"[RECORD] Sequence finished — {n} samples ready. Press 'Save data' to export.")
+            status_txt += f"  ({n} samples ready)"
+
+        self.lbl_status.config(text=status_txt)
         self._set_sequence_status(msg)
         self._update_sequence_controls()
         self._update_weights_controls_state()
@@ -971,13 +982,15 @@ class ControllerApp(tk.Tk):
         """
         Background thread: samples the real ADC position at 20 Hz and
         appends [elapsed_s, pos_mm] rows to _recording_data_buffer.
-        Runs for the lifetime of the sequence (stopped via
-        _recording_thread_running flag).
+        Runs only for the duration of the sequence (stopped via
+        _recording_thread_running flag or when sequence_running goes False).
+        The buffer is cleared by start_sequence() before this thread is
+        started — do NOT clear it here so the data survives after the thread
+        exits and the Save button can use it.
         """
         INTERVAL_S = 0.05
-        self._recording_data_buffer = []
-        self._recording_thread_running = True
         print("[RECORD] Recording thread started (20 Hz)")
+        # t=0 is the moment the recording thread begins (i.e. sequence start)
         loop_start = time.monotonic()
 
         while self._recording_thread_running and self.sequence_running:
@@ -1043,7 +1056,7 @@ class ControllerApp(tk.Tk):
                 text=f"Saved -> {display}  ({len(data)} rows)",
                 foreground="#2e7d32",
             ))
-            print(f"[RECORD] CSV saved: {display}  ({len(data)} rows)")
+            print(f"[RECORD] Recorded data saved! -> {display}  ({len(data)} rows)")
 
         except Exception as exc:
             err_msg = f"Save error: {exc}"
