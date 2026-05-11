@@ -1,5 +1,5 @@
 """Tonometry controller package."""
 
-from .app import ControllerApp
+from .app_Hoang import ControllerApp
 
 __all__ = ["ControllerApp"]
