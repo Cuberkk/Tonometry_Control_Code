@@ -1,0 +1,45 @@
+{
+  "Gantry": {
+    "mm_per_tick": 0.025479452054794523,
+    "top_mm": 9.3
+  },
+  "LVDT_10v": {
+    "hysteresis": "0.000",
+    "intercept": 0.7341613855951735,
+    "non_linearity": "0.007",
+    "repeatability": null,
+    "slope": 2.0114075151938926
+  },
+  "LVDT": {
+    "hysteresis": "0.000",
+    "intercept": 22.4304950495,
+    "non_linearity": "0.007",
+    "repeatability": null,
+    "slope": -2.14851485149,
+    "voltage_scale": 0,
+    "adc_offset":0.07
+  },
+  "Weights": {
+    "mm_per_tick": 0.07592182246175333,
+    "top_mm": 22.776546738526
+  },
+  "meta": {
+    "notes": "Auto-saved from GUI calibration",
+    "ts": "2025-09-26 01:46:09"
+  },
+  "weights_encoder": {
+    "bottom_counts": 0,
+    "slow_min_scale": 0.95,
+    "slow_zone_counts": 30,
+    "slow_zone_torque_floor": 300,
+    "tolerance_counts": 20,
+    "top_counts": 266
+  },
+  "weights_pid": {
+    "deadband_counts": 8.0,
+    "kd": 0.04,
+    "ki": 0.1,
+    "kp": 1.0,
+    "min_output": 400.0
+  }
+}
