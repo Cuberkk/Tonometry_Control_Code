@@ -1622,7 +1622,27 @@ class MotoronBase():
   def _send_command_and_read_response(self, cmd, response_length):
     self._send_command(cmd)
     return self._read_response(response_length)
+  
+  # def _send_command_and_read_response(self, cmd, response_length):
+  #     print("[DEBUG] sending:", list(cmd))
 
+  #     try:
+  #         self._send_command(cmd)
+  #         print("[DEBUG] write SUCCESS")
+  #     except Exception as e:
+  #         print("[DEBUG] write FAILED:", repr(e))
+  #         raise
+
+  #     time.sleep(0.005)
+
+  #     try:
+  #         result = self._read_response(response_length)
+  #         print("[DEBUG] read SUCCESS:", result)
+  #         return result
+  #     except Exception as e:
+  #         print("[DEBUG] read FAILED:", repr(e))
+  #         raise
+      
 def calculate_current_limit(milliamps, type, reference_mv, offset):
   """
   Calculates a current limit value that can be passed to the Motoron

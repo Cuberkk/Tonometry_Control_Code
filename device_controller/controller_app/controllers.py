@@ -50,7 +50,6 @@ class AxisManual:
 
         mag = max(0, min(config.MOTORON_MAX, mag))
 
-        # print(f"cmd:{mag}")
         raw = mag if self.dir > 0 else -mag
         self.last_cmd = raw
         for m, inv in zip(self.motor_ids, self.motor_invert):
@@ -137,35 +136,6 @@ class PIDController:
 
         return u_sat
 
-# class PIDController:
-#     """Minimal PD helper used by the weights axis (no integral term)."""
-
-#     def __init__(self, kp: float, ki: float, kd: float, output_limits: tuple[float, float]):
-#         self.kp = float(kp)
-#         self.kd = float(kd)
-#         self.output_limits = (float(output_limits[0]), float(output_limits[1]))
-#         self.reset()
-
-#     def reset(self):
-#         self._prev_error = None
-
-#     def compute(self, error: float, dt: float) -> float:
-#         if dt <= 0.0:
-#             dt = 1e-3
-#         proportional = self.kp * error
-#         derivative = 0.0
-#         if self._prev_error is not None:
-#             derivative = self.kd * (error - self._prev_error) / dt
-#         self._prev_error = error
-#         output = proportional + derivative
-#         low, high = self.output_limits
-#         if output > high:
-#             output = high
-#         elif output < low:
-#             output = low
-#         return output
-
-
 class WeightsPositionController:
     """Encoder-based positioning for the weights axis using PD instead of hardware braking."""
 
@@ -198,6 +168,7 @@ class WeightsPositionController:
             output_limits=(-config.MOTORON_MAX, config.MOTORON_MAX),
             integral_limits=(-config.WEIGHTS_PID_I_LIM, config.WEIGHTS_PID_I_LIM),
         )
+        self.gravity_output = max(0.0, config.WEIGHTS_PID_GRAVITY_OUTPUT)
         self.pid_deadband = config.WEIGHTS_PID_DEADBAND
         self._min_output = max(0.0, config.WEIGHTS_PID_MIN_OUTPUT)
         self._thread = threading.Thread(target=self._loop, daemon=True)
@@ -227,12 +198,17 @@ class WeightsPositionController:
         if self._estopped:
             return
         with self._lock:
+            self._arrive_flag = False
+            self.pid.reset()
             self._target = int(target)
         self._state = "queued"
 
     def stop(self, *, coast: bool = False):
         with self._lock:
             self._target = None
+            if not self.motor.allow_braking:
+                self.pre_target = None
+                self._arrive_flag = False
         self.pid.reset()
         self._last_cmd = 0
         if coast:
@@ -248,7 +224,7 @@ class WeightsPositionController:
             with self._lock:
                 self._target = None
             self.pid.reset()
-            self.motor.coast(self.motor_id)
+            self.motor.coast_motor(self.motor_id)
             self._last_cmd = 0
             self._state = "estopped"
         else:
@@ -256,6 +232,7 @@ class WeightsPositionController:
 
     def shutdown(self):
         self._shutdown.set()
+        self._pause.set()
         try:
             self._thread.join(timeout=1.0)
         except Exception:
@@ -265,16 +242,15 @@ class WeightsPositionController:
     def _loop(self):
         sleep_base = 1.0 / self.refresh_hz
         last_time = time.monotonic()
-        i = 0
         while not self._shutdown.is_set():
             self._pause.wait()
-            # print("Still in the loop")
+            if self._shutdown.is_set():
+                break
             now = time.monotonic()
             dt = max(1e-3, now - last_time)
             last_time = now
 
             if self._estopped:
-                # print('The motor is estopped, coasting')
                 self.motor.coast_motor(self.motor_id)
                 self._last_cmd = 0
                 self.pid.reset()
@@ -283,14 +259,9 @@ class WeightsPositionController:
 
             with self._lock:
                 target = self._target
-                # print("Current target:", target)
 
             if target is None:
-                if self.pre_target is not None and self.pre_target > 0:
-                    self.motor.set_speed(self.motor_id, int((self.top_holding_speed_pct / 100.0) * config.MOTORON_MAX))
-                else:
-                    self.motor.set_speed(self.motor_id, 0)
-                self._last_cmd = 0
+                self._apply_holding_command(self.pre_target)
                 self.pid.reset()
                 if self._state != "idle":
                     self._state = "idle"
@@ -300,9 +271,7 @@ class WeightsPositionController:
             self.pre_target = target
             self._arrive_flag = False
             try:
-                # print("Try to get the position")
                 current = self.encoder.get_position()
-                # print("Current position:", current)
             except Exception as exc:
                 self._state = f"encoder error: {exc}"
                 self.motor.brake_motor(self.motor_id, config.BRAKE_FLOOR)
@@ -316,31 +285,33 @@ class WeightsPositionController:
                 with self._lock:
                     self._target = None
                 self._arrive_flag = True
-                # print('Motor is arrived')
                 self._state = "at target"
-                
+                self._apply_holding_command(target)
+                self.pid.reset()
+
                 time.sleep(sleep_base)
                 continue
             else:
-                # print("Motor is moving")
                 self._state = "moving_up" if error > 0 else "moving_down"
 
-            # print("Send speed command")
             cmd = self._compute_pid_command(error, dt)
             self._last_cmd = cmd
 
-            # if cmd == 0 and holding:
-            #     self.motor.set_speed(self.motor_id, 0)
-            #     time.sleep(0.1)
-            #     continue
-            # print("Set motor speed", cmd)
             self.motor.set_speed(self.motor_id, cmd)
-            i+=1
-            # print(f"Iteration: {i}")
             time.sleep(sleep_base)
+
+    def _apply_holding_command(self, target):
+        """Apply the existing holding policy immediately and report its output."""
+        cmd = (int((self.top_holding_speed_pct / 100.0) * config.MOTORON_MAX)
+               if target is not None and target > 0 else 0)
+        self.motor.set_speed(self.motor_id, cmd)
+        self._last_cmd = cmd
 
     def _compute_pid_command(self, error: float, dt: float) -> int:
         output = self.pid.compute(error, dt)
+        # Positive targets lift the weights; bottom target 0 keeps its existing policy.
+        if self.pre_target is not None and self.pre_target > 0:
+            output += self.gravity_output
         max_cmd = self._max_output()
         output = max(-max_cmd, min(max_cmd, output))
 

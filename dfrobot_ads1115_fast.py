@@ -43,7 +43,8 @@ class FastADS1115I2C:
         try:
             self.bus.read_byte(self.addr)
             return True
-        except Exception:
+        except Exception as exc:
+            self.last_error = str(exc)
             return False
 
     def _write_channel(self, ch: int):

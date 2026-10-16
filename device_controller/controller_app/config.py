@@ -26,7 +26,7 @@ MOTOR_INVERT = {
 
 MOTORON_MAX = 600
 TORQUE_FLOOR = 110
-BRAKE_FLOOR = 0
+BRAKE_FLOOR = 150
 CMD_REFRESH_HZ = 20.0
 VIN_REFRESH_HZ = 20.0
 
@@ -86,7 +86,7 @@ def _load_weight_float(name: str, default: float) -> float:
     except Exception:
         return float(default)
 
-
+WEIGHTS_LOAD = 89.3 # Weight of the entire load in Newtons
 WEIGHTS_TOP_DEFAULT = _load_weight_default("top_counts", 5000)
 WEIGHTS_BOTTOM_DEFAULT = _load_weight_default("bottom_counts", 0)
 WEIGHTS_TOLERANCE_DEFAULT = max(1, _load_weight_default("tolerance_counts", 30))
@@ -120,6 +120,7 @@ ADC_OFFSET = calibration_data.get("LVDT", {}).get("adc_offset", 0.)
 
 PID_CFG = calibration_data.get("weights_pid", {})
 WEIGHTS_PID_KP = float(PID_CFG.get("kp", 1))
+WEIGHTS_PID_GRAVITY_OUTPUT = float(PID_CFG.get("gravity_output", 0.0))
 WEIGHTS_PID_KI = float(PID_CFG.get("ki", 0.005))  # Integral unused (PD control)
 WEIGHTS_PID_KD = float(PID_CFG.get("kd", 0))
 WEIGHTS_PID_DEADBAND = float(PID_CFG.get("deadband_counts", 2.0))
