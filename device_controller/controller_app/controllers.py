@@ -143,6 +143,7 @@ class WeightsPositionController:
         if encoder is None:
             raise ValueError("Encoder instance required for weights controller")
         self.motor = motor
+        self._released = False
         self.motor_id = int(motor_id)
         self.encoder = encoder
         self.invert = bool(invert)
@@ -198,6 +199,7 @@ class WeightsPositionController:
         if self._estopped:
             return
         with self._lock:
+            self._released = False
             self._arrive_flag = False
             self.pid.reset()
             self._target = int(target)
@@ -261,6 +263,12 @@ class WeightsPositionController:
                 target = self._target
 
             if target is None:
+                if self._released:
+                    self.motor.coast_motor(self.motor_id)
+                    self._last_cmd = 0
+                    self._state = "released"
+                    time.sleep(0.1)
+                    continue
                 self._apply_holding_command(self.pre_target)
                 self.pid.reset()
                 if self._state != "idle":
@@ -288,7 +296,6 @@ class WeightsPositionController:
                 self._state = "at target"
                 self._apply_holding_command(target)
                 self.pid.reset()
-
                 time.sleep(sleep_base)
                 continue
             else:
@@ -299,6 +306,14 @@ class WeightsPositionController:
 
             self.motor.set_speed(self.motor_id, cmd)
             time.sleep(sleep_base)
+
+    def release(self):
+        """Cancel the target and remove the retained lifting command."""
+        self.stop()
+        with self._lock:
+            self.pre_target = None
+            self._released = True
+        self.motor.coast_motor(self.motor_id)
 
     def _apply_holding_command(self, target):
         """Apply the existing holding policy immediately and report its output."""
