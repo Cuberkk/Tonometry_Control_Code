@@ -1,0 +1,2 @@
+indenter_diameter_mm,sample_thickness_mm,sample_diameter_mm,radius_to_thickness,observed_max_valid_depth_mm,observed_depth_to_thickness,poisson_ratio,finite_thickness_correction_applied
+12.45,12.0,64.0,0.5187499999999999,2.7010913861447143,0.22509094884539285,,False

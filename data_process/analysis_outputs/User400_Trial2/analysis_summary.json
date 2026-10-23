@@ -1,0 +1,68 @@
+{
+  "parameters": {
+    "E0": 0.1979313404711276,
+    "E1": 0.733804527497541,
+    "eta1": 3.449273664364119,
+    "E2": 0.6623490785893716,
+    "eta2": 79.48188943072451
+  },
+  "tau1": 4.700534727043746,
+  "tau2": 119.99999999999987,
+  "rmse": 0.06721783556144638,
+  "r2": 0.9967436926430461,
+  "flags": [
+    "time_constant_near_bound"
+  ],
+  "jac_condition": 73.57736775899522,
+  "optimizer_success": true,
+  "model": "E0 in series with (E1 || eta1) and (E2 || eta2)",
+  "fit_scope": "loading_and_recovery",
+  "dt_s": 0.01,
+  "radius_mm": 6.225,
+  "tau_bounds_s": [
+    0.5,
+    120.0
+  ],
+  "source_trial": "User_Data/User400/Trial2",
+  "parameter_interpretation": "Apparent indentation parameters under the original 1/(2a) scaling; no finite-thickness correction.",
+  "poor_phase_fits": [
+    {
+      "cycle": 1,
+      "phase": "stable_load",
+      "R2": -0.8697564710778498
+    },
+    {
+      "cycle": 2,
+      "phase": "stable_load",
+      "R2": -0.1488644615675443
+    }
+  ],
+  "acquisition_metadata": {
+    "origin_ns": 1792780342348639327,
+    "dt_s": 0.01,
+    "baseline_duration_s": 0.8,
+    "force_baseline_raw_n": -0.9179814461974054,
+    "displacement_baseline_raw_mm": 4.701229801935213,
+    "compression_sign": -1.0,
+    "displacement_sign": 1.0,
+    "force_bias_metadata_n": -0.8777217472268268,
+    "force_interpolated_bins": 12713,
+    "displacement_interpolated_bins": 21809,
+    "force_despike": null,
+    "displacement_despike": {
+      "window_s": 0.2,
+      "threshold": 0.12,
+      "n_sigma": 6.0,
+      "max_duration_s": 0.06,
+      "max_gap_s": 0.2
+    },
+    "force_despiked_samples": 0,
+    "displacement_despiked_samples": 965,
+    "force_despiked_bins": 0,
+    "displacement_despiked_bins": 958,
+    "valid_fraction": 1.0,
+    "sequence_file": "/home/erielab/Git_repo/Hoang_Tonometry_Control_Code/User_Data/User400/Trial2/sequence_20261023_143222_343867.csv",
+    "sequence_file_count": 1
+  },
+  "suspected_displacement_spike_bins": 0
+}

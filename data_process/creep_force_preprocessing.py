@@ -44,8 +44,81 @@ def _fill_short_interior_gaps(series, max_bins):
     return result
 
 
+def despike_raw_signal(time_s, values, *, window_s, threshold, n_sigma=6.,
+                       max_duration_s, max_gap_s=.2):
+    """Repair short, returning excursions on the native (possibly irregular) clock.
+
+    Candidates exceed both an absolute threshold and ``n_sigma`` times the
+    local robust noise scale (1.4826 times the median absolute residual from a
+    centered, time-based median). Only short candidate runs bounded by finite
+    noncandidates that return to the same level are repaired by time-linear
+    interpolation. Sustained steps, endpoints, NaNs, and long gaps are retained.
+    No samples are deleted and unflagged values are unchanged.
+
+    Run duration is its timestamp span plus the segment's median sampling
+    interval. The separate ``max_gap_s`` bounds the distance between the two
+    interpolation anchors, so an isolated sample next to a modest acquisition
+    gap can still be repaired without treating that gap as the spike duration.
+    Returns two ndarrays: ``(cleaned_values, repaired_spike_flags)``.
+    """
+    settings = (window_s, threshold, n_sigma, max_duration_s, max_gap_s)
+    if not all(np.isfinite(v) and v > 0 for v in settings):
+        raise ValueError("Despiking window, threshold, sigma, duration and gap must be finite and positive")
+    t = np.asarray(time_s, dtype=float)
+    y = np.asarray(values, dtype=float)
+    if t.ndim != 1 or y.ndim != 1 or len(t) != len(y):
+        raise ValueError("time_s and values must be matching one-dimensional arrays")
+    if not np.isfinite(t).all() or np.any(np.diff(t) <= 0):
+        raise ValueError("time_s must be finite and strictly increasing")
+    cleaned, repaired = y.copy(), np.zeros(len(y), dtype=bool)
+    if len(y) < 3:
+        return cleaned, repaired
+
+    finite = np.isfinite(y)
+    # Split the detector as well as its interpolation at invalid data/long gaps.
+    breaks = (~finite[:-1] | ~finite[1:] | (np.diff(t) > max_gap_s))
+    starts = np.flatnonzero(finite & np.r_[True, breaks])
+    ends = np.flatnonzero(finite & np.r_[breaks, True]) + 1
+    window = pd.Timedelta(seconds=window_s)
+    for first, stop in zip(starts, ends):
+        if stop - first < 3:
+            continue
+        local_t, local_y = t[first:stop], y[first:stop]
+        signal = pd.Series(local_y, index=pd.to_timedelta(local_t, unit="s"))
+        center = signal.rolling(window, center=True, min_periods=3).median()
+        residual = (signal - center).abs()
+        noise = 1.4826 * residual.rolling(window, center=True, min_periods=3).median()
+        cutoff = np.maximum(threshold, n_sigma * noise.to_numpy())
+        candidate = residual.to_numpy() > cutoff
+        run_starts = np.flatnonzero(candidate & ~np.r_[False, candidate[:-1]])
+        run_ends = np.flatnonzero(candidate & ~np.r_[candidate[1:], False])
+        nominal_dt = float(np.median(np.diff(local_t)))
+        for start, end in zip(run_starts, run_ends):
+            if start == 0 or end + 1 == len(local_y):
+                continue
+            left, right = start - 1, end + 1
+            duration = local_t[end] - local_t[start] + nominal_dt
+            if (duration > max_duration_s + 1e-12 or
+                    local_t[right] - local_t[left] > max_gap_s + 1e-12):
+                continue
+            # A true loading/unloading step does not return to its prior level.
+            if abs(local_y[right] - local_y[left]) > threshold:
+                continue
+            excursion = local_y[start:end + 1]
+            outside_anchors = ((excursion < min(local_y[left], local_y[right]) - threshold) |
+                               (excursion > max(local_y[left], local_y[right]) + threshold))
+            if not outside_anchors.all():
+                continue
+            selection = slice(first + start, first + end + 1)
+            cleaned[selection] = np.interp(local_t[start:end + 1],
+                                           local_t[[left, right]], local_y[[left, right]])
+            repaired[selection] = True
+    return cleaned, repaired
+
+
 def load_trial(trial_dir, dt=.02, baseline_s=.8, max_gap_s=.2,
-               force_axis="Fz", compression_sign=-1.0, displacement_sign=1.0):
+               force_axis="Fz", compression_sign=-1.0, displacement_sign=1.0,
+               displacement_despike=None, force_despike=None):
     """Load raw frames, an aligned grid, and explicit acquisition-quality audit.
 
     Returns ``force``, ``lvdt``, optional ``sequence`` DataFrames, ``sync``
@@ -55,6 +128,15 @@ def load_trial(trial_dir, dt=.02, baseline_s=.8, max_gap_s=.2,
     ``*_observed`` distinguishes actual bins from interpolated bins.
     The audit describes original file order; returned sensor frames are sorted
     and duplicate timestamps are removed, keeping the first recorded sample.
+    Optional ``*_despike`` dictionaries configure ``despike_raw_signal`` BEFORE
+    baseline subtraction and binning. Original CSV columns and ``*_raw_*``
+    readings remain intact. ``*_before_despike_*`` uses the same baseline/sign
+    as cleaned data and receives the same short-gap filling on the aligned
+    grid, allowing a direct comparison with the original pipeline.
+    With despiking enabled, repaired values remain
+    display-valid but ``fit_valid`` excludes repairs; ``*_spike`` distinguishes
+    these from ``*_gap_repaired``. With both options None the previous numerical
+    data and fit mask are preserved.
     """
     if dt <= 0 or baseline_s <= 0 or max_gap_s < 0:
         raise ValueError("dt and baseline_s must be positive; max_gap_s nonnegative")
@@ -93,42 +175,71 @@ def load_trial(trial_dir, dt=.02, baseline_s=.8, max_gap_s=.2,
     lvdt["displacement_raw_mm"] = pd.to_numeric(lvdt["Position (mm)"], errors="coerce")
     voltage = pd.to_numeric(lvdt["Voltage (V)"], errors="coerce")
     lvdt["sensor_valid"] = voltage.gt(.1) & voltage.lt(9.99) & np.isfinite(lvdt.displacement_raw_mm)
-    force_base = force.loc[force.time_s < baseline_s, "force_raw_n"].median()
-    displacement_base = lvdt.loc[(lvdt.time_s < baseline_s) & lvdt.sensor_valid,
-                                 "displacement_raw_mm"].median()
+    clean_force = force.force_raw_n.to_numpy(copy=True)
+    clean_displacement = lvdt.displacement_raw_mm.where(lvdt.sensor_valid).to_numpy(copy=True)
+    force["force_spike"], lvdt["displacement_spike"] = False, False
+    if force_despike is not None:
+        clean_force, force["force_spike"] = despike_raw_signal(
+            force.time_s, clean_force, **force_despike)
+    if displacement_despike is not None:
+        clean_displacement, lvdt["displacement_spike"] = despike_raw_signal(
+            lvdt.time_s, clean_displacement, **displacement_despike)
+    force_base = pd.Series(clean_force[force.time_s < baseline_s]).median()
+    displacement_base = pd.Series(clean_displacement[lvdt.time_s < baseline_s]).median()
     if not np.isfinite(force_base) or not np.isfinite(displacement_base):
         raise ValueError("The initial unloaded baseline has no valid sensor samples")
-    force["force_n"] = compression_sign * (force.force_raw_n - force_base)
-    lvdt["displacement_mm"] = displacement_sign * (lvdt.displacement_raw_mm - displacement_base)
-    lvdt.loc[~lvdt.sensor_valid, "displacement_mm"] = np.nan
+    force["force_before_despike_n"] = compression_sign * (force.force_raw_n - force_base)
+    lvdt["displacement_before_despike_mm"] = displacement_sign * (lvdt.displacement_raw_mm - displacement_base)
+    lvdt.loc[~lvdt.sensor_valid, "displacement_before_despike_mm"] = np.nan
+    force["force_n"] = compression_sign * (clean_force - force_base)
+    lvdt["displacement_mm"] = displacement_sign * (clean_displacement - displacement_base)
     start = max(force.time_s.min(), lvdt.time_s.min())
     end = min(force.time_s.max(), lvdt.time_s.max())
     first_bin, last_bin = int(np.ceil(start / dt)), int(np.floor(end / dt)) - 1
     if last_bin < first_bin:
         raise ValueError("No complete common time bins available")
     bins = pd.Index(np.arange(first_bin, last_bin + 1), name="bin")
-    force_bins = force.groupby(np.floor(force.time_s / dt).astype("int64"))["force_n"]
-    lvdt_bins = lvdt.groupby(np.floor(lvdt.time_s / dt).astype("int64"))["displacement_mm"]
+    force_group = force.groupby(np.floor(force.time_s / dt).astype("int64"))
+    lvdt_group = lvdt.groupby(np.floor(lvdt.time_s / dt).astype("int64"))
+    force_bins = force_group["force_n"]
+    lvdt_bins = lvdt_group["displacement_mm"]
     synced = pd.DataFrame({"time_s": (bins.to_numpy() + .5) * dt}, index=bins)
     synced["force_n"] = force_bins.mean().reindex(bins)
     synced["force_min_n"] = force_bins.min().reindex(bins)
     synced["force_max_n"] = force_bins.max().reindex(bins)
     synced["displacement_mm"] = lvdt_bins.median().reindex(bins)
+    synced["force_before_despike_n"] = force_group["force_before_despike_n"].mean().reindex(bins)
+    synced["force_before_despike_max_n"] = force_group["force_before_despike_n"].max().reindex(bins)
+    synced["displacement_before_despike_mm"] = lvdt_group["displacement_before_despike_mm"].median().reindex(bins)
+    synced["force_spike"] = force_group.force_spike.any().reindex(bins, fill_value=False)
+    synced["displacement_spike"] = lvdt_group.displacement_spike.any().reindex(bins, fill_value=False)
     synced["force_observed"] = synced.force_n.notna()
     synced["displacement_observed"] = synced.displacement_mm.notna()
     invalid_bins = (~lvdt.sensor_valid).groupby(np.floor(lvdt.time_s / dt).astype("int64")).any()
-    synced["repaired_displacement"] = invalid_bins.reindex(bins, fill_value=False)
+    invalid_force_bins = (~np.isfinite(force.force_raw_n)).groupby(np.floor(force.time_s / dt).astype("int64")).any()
+    synced["displacement_gap_repaired"] = invalid_bins.reindex(bins, fill_value=False)
+    synced["force_gap_repaired"] = invalid_force_bins.reindex(bins, fill_value=False)
     # A run of N missing centers has its bracketing observations (N+1)*dt apart.
     max_bins = max(0, int(np.floor(max_gap_s / dt + 1e-9)) - 1)
-    for column in ("force_n", "displacement_mm"):
+    for column in ("force_n", "displacement_mm", "force_before_despike_n",
+                   "displacement_before_despike_mm"):
         synced[column] = _fill_short_interior_gaps(synced[column], max_bins)
-    synced["repaired_displacement"] |= ~synced.displacement_observed & synced.displacement_mm.notna()
+    synced["displacement_gap_repaired"] |= ~synced.displacement_observed & synced.displacement_mm.notna()
+    synced["force_gap_repaired"] |= ~synced.force_observed & synced.force_n.notna()
+    synced["repaired_displacement"] = synced.displacement_gap_repaired | synced.displacement_spike
+    synced["repaired_force"] = synced.force_gap_repaired | synced.force_spike
     synced["valid"] = np.isfinite(synced.force_n) & np.isfinite(synced.displacement_mm)
     synced["fit_valid"] = synced.valid
+    if displacement_despike is not None or force_despike is not None:
+        synced["fit_valid"] &= ~synced.repaired_force & ~synced.repaired_displacement
     synced.reset_index(drop=True, inplace=True)
     audit = pd.DataFrame(audits)
     audit["rejected_samples"] = 0
     audit.loc[audit.source == "lvdt", "rejected_samples"] = int((~lvdt.sensor_valid).sum())
+    audit.loc[audit.source == "force", "rejected_samples"] = int((~np.isfinite(force.force_raw_n)).sum())
+    audit["despiked_samples"] = 0
+    audit.loc[audit.source == "force", "despiked_samples"] = int(force.force_spike.sum())
+    audit.loc[audit.source == "lvdt", "despiked_samples"] = int(lvdt.displacement_spike.sum())
     metadata = {
         "origin_ns": origin, "dt_s": float(dt), "baseline_duration_s": baseline_s,
         "force_baseline_raw_n": float(force_base),
@@ -138,6 +249,12 @@ def load_trial(trial_dir, dt=.02, baseline_s=.8, max_gap_s=.2,
                                   if f"bias_{force_axis.lower()}" in force else np.nan),
         "force_interpolated_bins": int((~synced.force_observed & synced.force_n.notna()).sum()),
         "displacement_interpolated_bins": int((~synced.displacement_observed & synced.displacement_mm.notna()).sum()),
+        "force_despike": dict(force_despike) if force_despike is not None else None,
+        "displacement_despike": dict(displacement_despike) if displacement_despike is not None else None,
+        "force_despiked_samples": int(force.force_spike.sum()),
+        "displacement_despiked_samples": int(lvdt.displacement_spike.sum()),
+        "force_despiked_bins": int(synced.force_spike.sum()),
+        "displacement_despiked_bins": int(synced.displacement_spike.sum()),
         "valid_fraction": float(synced.valid.mean()),
         "sequence_file": str(sequence_files[-1]) if sequence_files else None,
         "sequence_file_count": len(sequence_files),
@@ -255,7 +372,7 @@ def segment_cycles(sync, on_fraction=.2, off_fraction=.1, onset_fraction=.05,
                                      max(1, int(np.ceil(debounce_s / dt))))
     intervals = [(a, b, partial) for a, b, partial in intervals if t[b] - t[a] >= min_loaded_s]
     phases = pd.DataFrame({"time_s": t, "force_segment_n": f, "cycle": 0,
-                           "phase": "unloaded", "fit_valid": sync.valid.to_numpy(bool),
+                           "phase": "unloaded", "fit_valid": sync.get("fit_valid", sync.valid).to_numpy(bool),
                            "stable_mask": False})
     rows = []
     previous_end = 0
@@ -309,7 +426,8 @@ def segment_cycles(sync, on_fraction=.2, off_fraction=.1, onset_fraction=.05,
         creep_gain = float(sync.loc[end_h_mask, "displacement_mm"].median() -
                            sync.loc[start_h_mask, "displacement_mm"].median())
         loaded = (t >= t[onset]) & (t <= t[end])
-        peak_source = "force_max_n" if "force_max_n" in sync else "force_n"
+        peak_source = ("force_before_despike_max_n" if "force_before_despike_max_n" in sync
+                       else "force_max_n" if "force_max_n" in sync else "force_n")
         flags = []
         if partial:
             flags.append("incomplete_unload")
