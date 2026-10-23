@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import datetime
+import math
 import queue
 import signal
 import threading
@@ -84,6 +85,8 @@ class ControllerApp(tk.Tk):
         self._manual_speed_override = None
 
         self.weights_top_target = tk.IntVar(value=config.WEIGHTS_TOP_DEFAULT)
+        self.holding_weight_g = tk.StringVar(value=str(config.HOLDING_WEIGHT_G_DEFAULT))
+        self._applied_holding_weight_g = config.HOLDING_WEIGHT_G_DEFAULT
         self.weights_bottom_target = tk.IntVar(value=config.WEIGHTS_BOTTOM_DEFAULT)
         self.weights_tolerance = tk.IntVar(value=config.WEIGHTS_TOLERANCE_DEFAULT)
         self.pid_kp = tk.DoubleVar(value=config.WEIGHTS_PID_KP)
@@ -116,6 +119,8 @@ class ControllerApp(tk.Tk):
         self.log_writer: Optional[csv.writer] = None
         self.log_path: Optional[str] = None
         self._sequence_status_text = "Sequence idle"
+        self._target_timed_out = False
+        self._dwell_progress = None
         self.sequence_logging_owned = False
 
         self.manual_control = tk.BooleanVar(value=True)
@@ -123,6 +128,7 @@ class ControllerApp(tk.Tk):
         self._gui_ticks = {name: deque() for name in ("gui", "lvdt", "ati")}
         self._gui_report_time = time.monotonic()
         self._build_ui()
+        self._apply_holding_weight()
         self._update_tolerance_label()
 
         self.after(int(1000.0 / config.CMD_REFRESH_HZ), self._refresh_commands)
@@ -159,6 +165,8 @@ class ControllerApp(tk.Tk):
 
         self.lbl_status = ttk.Label(top, text="Ready")
         self.lbl_status.pack(side=tk.LEFT)
+        self.lbl_retry = ttk.Label(top, text="", foreground="red")
+        self.lbl_retry.pack(side=tk.LEFT, padx=(8, 0))
 
         self.lbl_vin = ttk.Label(top, text="VIN: --.- V")
         self.lbl_vin.pack(side=tk.LEFT, padx=(12, 0))
@@ -220,7 +228,8 @@ class ControllerApp(tk.Tk):
         self.adc_ax.set_xlabel("Time (s)")
         self.adc_ax.set_ylabel("Position (mm)")
         self.adc_ax.grid(True)
-        self.adc_ax.set_ylim(-3, 33)
+        self.adc_ax.axhline(0, color="black", linestyle="-", linewidth=1.0)
+        self.adc_ax.set_ylim(-1, 30)
         self.adc_ax.set_xlim(0, self.adc_plot_window_sec)
 
         self.adc_line, = self.adc_ax.plot([], [])
@@ -292,7 +301,8 @@ class ControllerApp(tk.Tk):
                 from .labjackati import LabjackATIReader
 
                 reader = LabjackATIReader(
-                    sensor_num="44297", bias_mode=False, acquisition_rate=800,
+                    sensor_num="44297", bias_mode=False,
+                    acquisition_rate=config.LABJACK_ACQUISITION_HZ,
                 )
                 started = time.monotonic()
                 count = 0
@@ -331,6 +341,9 @@ class ControllerApp(tk.Tk):
         panel = ttk.Frame(master)
         controls = ttk.Frame(panel)
         controls.pack(fill=tk.X, padx=8, pady=4)
+        self.var_ati_warning = tk.StringVar(value="")
+        ttk.Label(controls, textvariable=self.var_ati_warning, foreground="red",
+                  wraplength=260).pack(side=tk.LEFT, padx=(0, 8))
         self.btn_ati_bias = ttk.Button(controls, text="Bias ATI Force", command=self._bias_ati)
         self.btn_ati_bias.pack(side=tk.LEFT)
         ttk.Button(controls, text="Remove Bias", command=self._clear_ati_bias).pack(side=tk.LEFT, padx=8)
@@ -345,8 +358,9 @@ class ControllerApp(tk.Tk):
         self.ati_ax.set_ylabel("Fz (N)")
         self.ati_ax.set_title("ATI Fz — Unbiased")
         self.ati_ax.set_xlim(0, self.adc_plot_window_sec)
-        self.ati_ax.set_ylim(-25, 25)
+        self.ati_ax.set_ylim(-25, 5)
         self.ati_ax.grid(True)
+        self.ati_ax.axhline(0, color="black", linestyle="-", linewidth=1.0)
         self.ati_line, = self.ati_ax.plot([], [])
         self.ati_canvas = FigureCanvasTkAgg(self.ati_fig, master=panel)
         self.ati_canvas.draw()
@@ -375,9 +389,19 @@ class ControllerApp(tk.Tk):
         self.btn_ati_bias.state(["!disabled"] if sample is not None else ["disabled"])
         self._set_sensor_plot_available("ati", sample is not None, error or "Waiting for valid data")
         if sample is None:
+            self.var_ati_warning.set("")
             self.var_ati_status.set(f"ATI unavailable: {error}")
         else:
             timestamp, forces, hz = sample
+            warnings = []
+            for axis, value, limit, unit in zip(
+                ("Fx", "Fy", "Fz", "Tx", "Ty", "Tz"), forces,
+                config.ATI_AXIS_LIMITS, ("N", "N", "N", "N mm", "N mm", "N mm"),
+            ):
+                if abs(value) >= config.ATI_LIMIT_WARNING_RATIO * limit:
+                    state = "LIMIT" if abs(value) >= limit else "NEAR LIMIT"
+                    warnings.append(f"{axis} {value:+.2f}/{limit:g} {unit} ({state})")
+            self.var_ati_warning.set("WARNING: " + "; ".join(warnings) if warnings else "")
             if timestamp != self._ati_last_time:
                 if self.ati_plot_t0 is None:
                     self.ati_plot_t0 = timestamp
@@ -390,13 +414,13 @@ class ControllerApp(tk.Tk):
                     self.ati_force_buf.popleft()
             offset = 0.0 if self._ati_bias is None else self._ati_bias[2]
             mode = "Unbiased" if self._ati_bias is None else "Biased"
-            self.var_ati_status.set(f"Fz: {forces[2] - offset:+.3f} N | {hz:.1f} Hz | {mode}")
+            self.var_ati_status.set(f"Fz: {forces[2] - offset:+.2f} N | {hz:.1f} Hz | {mode}")
             # Move the axis at one-second intervals; keep line updates at the GUI refresh rate.
             right = max(self.adc_plot_window_sec, float(int(self.ati_time_buf[-1]) + 1))
             self._ati_renderer.render(
                 list(self.ati_time_buf), [v - offset for v in self.ati_force_buf],
                 xlim=(max(0.0, right - self.adc_plot_window_sec), right),
-                ylim=(-25.0, 25.0), title=f"ATI Fz — {mode}",
+                ylim=(-25.0, 5.0), title=f"ATI Fz — {mode}",
             )
         self.after(GUI_REFRESH_MS, self._refresh_ati_plot)
 
@@ -425,7 +449,7 @@ class ControllerApp(tk.Tk):
         row1 = ttk.Frame(f)
         row1.pack(fill=tk.X, padx=8, pady=(4, 2))
 
-        ttk.Label(row1, text="Speed %:").pack(side=tk.LEFT)
+        ttk.Label(row1, text="Command limit %:").pack(side=tk.LEFT)
         self.weights_speed_slider = ttk.Scale(row1, from_=5, to=100, orient=tk.HORIZONTAL, length=320, command=self._on_weight_speed)
         initial_speed = (
             self.weights_controller.speed_percent
@@ -463,6 +487,11 @@ class ControllerApp(tk.Tk):
         self.btn_weights_go_top.pack(side=tk.LEFT, padx=(0, 6))
         self.btn_weights_set_top = ttk.Button(row2, text="Set Current", command=lambda: self._set_target_from_current("top"))
         self.btn_weights_set_top.pack(side=tk.LEFT)
+        ttk.Label(row2, text="Holding weight (g):").pack(side=tk.LEFT, padx=(12, 4))
+        self.entry_holding_weight = ttk.Entry(row2, textvariable=self.holding_weight_g, width=8)
+        self.entry_holding_weight.pack(side=tk.LEFT)
+        self.entry_holding_weight.bind("<Return>", self._apply_holding_weight)
+        self.entry_holding_weight.bind("<FocusOut>", self._apply_holding_weight)
 
         row3 = ttk.Frame(f)
         row3.pack(fill=tk.X, padx=8, pady=(4, 2))
@@ -594,6 +623,12 @@ class ControllerApp(tk.Tk):
 
         self.var_seq_status = tk.StringVar(value="Sequence idle")
         ttk.Label(f, textvariable=self.var_seq_status).pack(fill=tk.X, padx=8, pady=(4, 8))
+        self.var_dwell_progress = tk.StringVar(value="Dwell: idle")
+        ttk.Label(f, textvariable=self.var_dwell_progress).pack(fill=tk.X, padx=8)
+        self.dwell_progress_bar = ttk.Progressbar(
+            f, orient=tk.HORIZONTAL, mode="determinate", maximum=100.0,
+        )
+        self.dwell_progress_bar.pack(fill=tk.X, padx=8, pady=(4, 8))
 
         self._update_sequence_controls()
         return f
@@ -622,13 +657,13 @@ class ControllerApp(tk.Tk):
     def _update_lvdt_display(self):
         offset = 0.0 if self._lvdt_bias is None else self._lvdt_bias
         mode = "Unbiased" if self._lvdt_bias is None else "Biased"
-        self.var_lvdt_status.set(f"Position: {self.adc.latest_pos - offset:+.3f} mm | {self.adc.hz:.1f} Hz | {mode}")
+        self.var_lvdt_status.set(f"Position: {self.adc.latest_pos - offset:+.2f} mm | {self.adc.hz:.1f} Hz | {mode}")
         right = max(self.adc_plot_window_sec,
                     float(int(self.adc_time_buf[-1]) + 1) if self.adc_time_buf else self.adc_plot_window_sec)
         self._adc_renderer.render(
             list(self.adc_time_buf), [v - offset for v in self.adc_pos_buf],
             xlim=(max(0.0, right - self.adc_plot_window_sec), right),
-            ylim=(-3.0 - offset, 33.0 - offset), title=f"LVDT Position — {mode}",
+            ylim=(-1.0, 30.0), title=f"LVDT Position — {mode}",
         )
 
     def _refresh_adc_plot(self):
@@ -705,52 +740,84 @@ class ControllerApp(tk.Tk):
             self.weights_controller.stop()
         self.var_weights_cmd.set("0")
 
-    def _move_weights_with_speed(self, target: int, speed_override: float | None = None, retension: bool = False, label: str = "") -> bool:
-        """Move weights to a target with optional temporary speed override and retension lift."""
-        if not self.weights_controller or self.estopped or self._motion_stop.is_set():
+    def _move_weights_with_speed(self, target: int, speed_override: float | None = None,
+                                 retension: bool = False, label: str = "") -> bool:
+        """Move weights using encoder position PID, with a lower release command cap."""
+        if (not self.weights_controller or self.estopped
+                or self._motion_stop.is_set() or self.sequence_stop.is_set()):
             return False
         prev_speed = self.weights_controller.speed_percent
         success = False
         try:
-            # Change the commanded speed
+            # The GUI limit remains the upper bound, including slow release.
             if speed_override is not None:
-                self.weights_controller.set_speed_percent(speed_override)
-            else:
-                self.weights_controller.set_speed_percent(config.PID_LIFT_SPEED_PCT)
+                self.weights_controller.set_speed_percent(min(prev_speed, speed_override))
             # Set the target position
             self._diagnostic_target = int(target)
-            self.weights_controller.move_to(int(target))
+            self.weights_controller.move_to(
+                int(target), release_at_rest=label == "bottom",
+                cancel_events=(self._motion_stop, self.sequence_stop),
+            )
 
             # Send status to the main UI thread.
             if label:
                 self._ui_messages.put(f"Moving weights to {label} ({target} counts)")
             
-            success = self._wait_for_weights_target(target, timeout=120.0)
+            success = self._wait_for_weights_target(
+                target,
+                timeout=None if label == "bottom" else config.WEIGHTS_TARGET_TIMEOUT_SEC,
+            )
             if success and not (self.estopped or self._motion_stop.is_set() or self.sequence_stop.is_set()):
                 if label == "top":
                     self._ui_messages.put("On top")
                 elif label == "bottom":
-                    self._ui_messages.put("On bottom")
+                    self._ui_messages.put("Weight released (coast)")
                 else:
                     self._ui_messages.put(f"Target reached ({target} counts)")
 
-
-
             if retension and config.WEIGHTS_BOTTOM_RETENSION_COUNTS > 0 and success:
                 up_target = int(target) + int(config.WEIGHTS_BOTTOM_RETENSION_COUNTS)
-                self.weights_controller.set_speed_percent(config.WEIGHTS_BOTTOM_RETENSION_SPEED_PCT)
+                self.weights_controller.set_speed_percent(min(prev_speed, config.WEIGHTS_BOTTOM_RETENSION_SPEED_PCT))
                 self._ui_messages.put(f"Retensioning (+{config.WEIGHTS_BOTTOM_RETENSION_COUNTS} counts)")
-                self.weights_controller.move_to(up_target)
-                success = self._wait_for_weights_target(up_target, timeout=20.0) and success
+                self.weights_controller.move_to(
+                    up_target, cancel_events=(self._motion_stop, self.sequence_stop),
+                )
+                success = self._wait_for_weights_target(up_target, timeout=config.WEIGHTS_TARGET_TIMEOUT_SEC) and success
         finally:
             self.weights_controller.set_speed_percent(prev_speed)
         return success
+
+    def _apply_holding_weight(self, _event=None) -> bool:
+        try:
+            weight = float(self.holding_weight_g.get())
+            if not math.isfinite(weight) or weight < 0:
+                raise ValueError
+            # Refit: 400 g -> old 300 g output (107.5), 800 g -> 170.
+            command = 0.0 if weight == 0 else 45.0 + 0.15625 * weight
+            percent = 100.0 * command / config.MOTORON_MAX
+            if percent > 100.0:
+                raise ValueError
+        except ValueError:
+            self.lbl_status.config(text="Invalid holding weight: enter a nonnegative weight within motor output limit")
+            return False
+        if self.weights_controller:
+            self.weights_controller.top_holding_speed_pct = percent
+            # Moving compensation: 400 g -> 137.5, 800 g -> 170.
+            # Keep the lower, separately calibrated output after arrival.
+            self.weights_controller.gravity_output = (
+                0.0 if weight == 0 else min(config.MOTORON_MAX, 105.0 + 0.08125 * weight)
+            )
+        self._applied_holding_weight_g = weight
+        self.lbl_status.config(text=f"Holding weight: {weight:g} g | command: {int(percent * config.MOTORON_MAX / 100.0)}")
+        return True
 
     def move_weights_to_top(self):
         if not self.weights_controller or self.manual_control.get():
             print("Button Disabled")
             return
         target = int(self.weights_top_target.get())
+        if not self._apply_holding_weight():
+            return
         self._start_target_move(target, label="top")
 
     def move_weights_to_bottom(self):
@@ -869,6 +936,13 @@ class ControllerApp(tk.Tk):
         state_1 = tk.NORMAL if self.manual_control.get() else tk.DISABLED
         state_2 = tk.DISABLED if self.manual_control.get() else tk.NORMAL
         if self.manual_control.get():
+            # Cancel automatic work before pausing its controller thread, so
+            # its worker exits even when waiting for release to become still.
+            self._motion_stop.set()
+            if self.sequence_running:
+                self.sequence_stop.set()
+                self._set_sequence_status("Stopping sequence: Manual Control Mode enabled")
+            self.weights_controller.stop()
             self.weights_controller._pause.clear()
         else:
             self.weights_controller._pause.set()
@@ -885,6 +959,7 @@ class ControllerApp(tk.Tk):
         ):
             if btn is not None:
                 btn.config(state=state_2)
+        self._update_sequence_controls()
 
 
     def _update_tolerance_label(self):
@@ -923,7 +998,7 @@ class ControllerApp(tk.Tk):
     def _refresh_adc(self):
         if self.adc.enabled:
             self.lbl_adc.config(
-                text=f"LVDT: {self.adc.latest_v:0.3f} V | {self.adc.latest_pos:0.3f} mm  |  {self.adc.hz:0.1f} Hz"
+                text=f"LVDT: {self.adc.latest_v:0.2f} V | {self.adc.latest_pos:0.2f} mm  |  {self.adc.hz:0.1f} Hz"
             )
             self.after(200, self._refresh_adc)
 
@@ -946,6 +1021,7 @@ class ControllerApp(tk.Tk):
         self.after(100, self._refresh_weights_status)
 
     def _refresh_sequence_label(self):
+        self.lbl_retry.config(text="Try again" if self._target_timed_out else "")
         try:
             current = self.var_seq_status.get()
         except Exception:
@@ -955,7 +1031,16 @@ class ControllerApp(tk.Tk):
                 self.var_seq_status.set(self._sequence_status_text)
             except Exception:
                 pass
-        self.after(200, self._refresh_sequence_label)
+        dwell = self._dwell_progress
+        if dwell is None:
+            self.var_dwell_progress.set("Dwell: idle")
+            self.dwell_progress_bar["value"] = 0.0
+        else:
+            label, started, duration = dwell
+            elapsed = min(duration, max(0.0, time.monotonic() - started))
+            self.var_dwell_progress.set(f"{label}: {elapsed:.1f} / {duration:.1f} s")
+            self.dwell_progress_bar["value"] = 100.0 * elapsed / duration if duration > 0 else 100.0
+        self.after(100, self._refresh_sequence_label)
 
     # ---------- sequences ----------
 
@@ -966,8 +1051,13 @@ class ControllerApp(tk.Tk):
         if not self.weights_controller or self.estopped:
             self._set_sequence_status("Sequence unavailable")
             return
+        if self.manual_control.get():
+            self._set_sequence_status("Turn off Manual Control Mode before starting sequence")
+            return
         if self.sequence_running or (self._motion_thread and self._motion_thread.is_alive()):
             self._set_sequence_status("Motion already running")
+            return
+        if not self._apply_holding_weight():
             return
         try:
             top_target = int(self.weights_top_target.get())
@@ -978,7 +1068,6 @@ class ControllerApp(tk.Tk):
         except Exception as exc:
             self._set_sequence_status(f"Invalid sequence input: {exc}")
             return
-
         auto_log_started = False
         if not self.logging_active:
             auto_log_started = self._start_logging(auto=True)
@@ -1020,6 +1109,12 @@ class ControllerApp(tk.Tk):
         success = True
 
         try:
+            # Record baseline data before the first weight release.
+            self._set_sequence_status("Recording bias data (1 s before weight release)")
+            if not self._sleep_with_cancel(1.0):
+                success = False
+                return
+
             for idx in range(1, cycles + 1):
                 if self.sequence_stop.is_set() or self.estopped:
                     success = False
@@ -1033,7 +1128,7 @@ class ControllerApp(tk.Tk):
                 ):
                     success = False
                     break
-                if not self._sleep_with_cancel(bottom_dwell):
+                if not self._wait_for_dwell(f"Cycle {idx}/{cycles}: Low dwell", bottom_dwell):
                     success = False
                     break
 
@@ -1042,10 +1137,13 @@ class ControllerApp(tk.Tk):
                     break
 
                 self._set_sequence_status(f"Cycle {idx}/{cycles}: moving to top")
-                if not self._move_weights_with_speed(top_target, label="top"):
+                if not self._move_weights_with_speed(
+                    top_target,
+                    label="top",
+                ):
                     success = False
                     break
-                if not self._sleep_with_cancel(top_dwell):
+                if not self._wait_for_dwell(f"Cycle {idx}/{cycles}: Top dwell", top_dwell):
                     success = False
                     break
 
@@ -1060,10 +1158,11 @@ class ControllerApp(tk.Tk):
     def _sequence_finished(self, success: bool, completed: int, requested: int):
         self.sequence_running = False
         self.sequence_stop.clear()
-        if self.weights_controller and not self.estopped:
-            self.weights_controller.stop()
+        sequence_completed = success and completed == requested
+        if self.weights_controller and not self.estopped and not sequence_completed:
+            self.weights_controller.release()
 
-        if success and completed == requested:
+        if sequence_completed:
             msg = f"Sequence complete ({completed} cycles)"
             self.lbl_status.config(text="Sequence complete")
         else:
@@ -1073,25 +1172,50 @@ class ControllerApp(tk.Tk):
         self._set_sequence_status(msg)
         self._update_sequence_controls()
         self._update_weights_controls_state()
-        if self.sequence_logging_owned and self.logging_active:
+        if (self.sequence_logging_owned or self._target_timed_out) and self.logging_active:
             self._stop_logging()
         self.sequence_logging_owned = False
 
     def _wait_for_weights_target(self, target: int, timeout: Optional[float] = None) -> bool:
+        self._target_timed_out = False
         start = time.monotonic()
         while True:
             if self.sequence_stop.is_set() or self._motion_stop.is_set() or self.estopped:
                 return False
-            if self.weights_controller is None:
+            controller = self.weights_controller
+            if controller is None:
                 return False
-            current = self.encoder.get_position() if self.encoder else None
-            if current is not None and abs(int(target) - int(current)) <= self.weights_controller.tolerance_counts:
-                return True
-            if self.weights_controller._arrive_flag and self.weights_controller.target_position is None:
-                return True
+            failure_reason = controller.failure_reason
+            if failure_reason:
+                self._target_timed_out = True
+                controller.release()
+                if self.sequence_running:
+                    self.sequence_stop.set()
+                self._ui_messages.put(f"Position control failed: Try again ({failure_reason})")
+                return False
+            active_target = controller.target_position
+            if active_target is None:
+                # Only the controller can confirm arrival or a stationary
+                # release after applying holding output or coasting.
+                return bool(controller._arrive_flag)
+            if active_target != int(target):
+                return False
             if timeout is not None and (time.monotonic() - start) > timeout:
+                self._target_timed_out = True
+                controller.release()
+                if self.sequence_running:
+                    self.sequence_stop.set()
+                self._ui_messages.put("Target timeout: Try again")
                 return False
             self.sequence_stop.wait(0.1)
+
+    def _wait_for_dwell(self, label: str, duration: float) -> bool:
+        self._set_sequence_status(label)
+        self._dwell_progress = (label, time.monotonic(), duration)
+        try:
+            return self._sleep_with_cancel(duration)
+        finally:
+            self._dwell_progress = None
 
     def _sleep_with_cancel(self, duration: float) -> bool:
         if duration <= 0:
@@ -1119,7 +1243,7 @@ class ControllerApp(tk.Tk):
         self.after(100, self._poll_sequence_thread)
 
     def _update_sequence_controls(self):
-        can_run = bool(self.weights_controller and not self.estopped)
+        can_run = bool(self.weights_controller and not self.estopped and not self.manual_control.get())
         btn_start = getattr(self, "btn_seq_start", None)
         btn_stop = getattr(self, "btn_seq_stop", None)
         if btn_start is not None:
@@ -1177,7 +1301,11 @@ class ControllerApp(tk.Tk):
                     "requested_target", "encoder_error_counts",
                     "manual_direction", "manual_cmd", "pid_enabled",
                     "arrive_flag", "holding_speed_pct",
-
+                    "holding_weight_g",
+                    "weights_velocity_counts_s", "weights_velocity_target_counts_s",
+                    "weights_velocity_mode", "pull_up_speed_counts_s",
+                    "release_speed_counts_s", "weights_velocity_stop_reason",
+                    "weights_control_mode",
                 ]
             )
             sensor_log = SensorLog(path, filenames={"ati": "Force.csv", "lvdt": "LVDT.csv"})
@@ -1253,10 +1381,12 @@ class ControllerApp(tk.Tk):
                 weights_state = self.weights_controller.state
                 weights_target = self.weights_controller.target_position
                 weights_cmd = self.weights_controller.last_cmd
+                control_mode = "position" if self.weights_controller._pause.is_set() else "manual"
             else:
                 weights_state = ""
                 weights_target = ""
                 weights_cmd = ""
+                control_mode = "manual"
             seq_status = self._sequence_status_text
 
             try:
@@ -1278,7 +1408,10 @@ class ControllerApp(tk.Tk):
                             self.weights_controller._pause.is_set() if self.weights_controller else False,
                             self.weights_controller._arrive_flag if self.weights_controller else "",
                             self.weights_controller.top_holding_speed_pct if self.weights_controller else "",
-
+                            self._applied_holding_weight_g,
+                            # Retain legacy velocity columns for CSV readers.
+                            "", "", "", "", "", "",
+                            control_mode,
                         ]
                     )
                     rows_since_flush += 1

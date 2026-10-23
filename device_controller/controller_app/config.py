@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
+import warnings
 from pathlib import Path
 import numpy as np
 DEVICE_DIR = Path(__file__).resolve().parent.parent
@@ -17,6 +19,11 @@ LOG_DIR = REPO_ROOT / "logs"
 I2C_BUS = 1
 MOTORON_ADDR = 0x10
 MOTOR_ID = 1
+WEIGHTS_TARGET_TIMEOUT_SEC = 5.0
+
+# Unbiased ATI limits: Fx/Fy/Fz in N, Tx/Ty/Tz in N mm.
+ATI_AXIS_LIMITS = (25.0, 25.0, 35.0, 250.0, 250.0, 250.0)
+ATI_LIMIT_WARNING_RATIO = 0.90
 
 MOTOR_INVERT = {
     1: False,   # Weights
@@ -67,6 +74,29 @@ def reload_calibration() -> dict:
     return calibration_data
 
 
+def _load_acquisition_rate(name: str, default: float) -> float:
+    """Load a positive rate in Hz; invalid settings fall back with a warning."""
+    try:
+        settings = calibration_data.get("acquisition", {})
+        value = settings.get(name, default)
+        if isinstance(value, bool):
+            raise ValueError("Boolean values are not sampling rates")
+        rate = float(value)
+        if not math.isfinite(rate) or rate <= 0:
+            raise ValueError("Sampling rates must be finite and positive")
+        return rate
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        warnings.warn(
+            f"Invalid acquisition.{name}; using {default:g} Hz",
+            RuntimeWarning, stacklevel=2,
+        )
+        return float(default)
+
+
+# Read at application startup. Restart the GUI after editing calibration.json.
+LABJACK_ACQUISITION_HZ = _load_acquisition_rate("labjack_hz", 400.0)
+
+
 def _weights_cfg() -> dict:
     return calibration_data.get("weights_encoder", {})
 
@@ -86,6 +116,27 @@ def _load_weight_float(name: str, default: float) -> float:
     except Exception:
         return float(default)
 
+
+def _load_holding_weight_g(default: float = 400.0) -> float:
+    try:
+        value = _weights_cfg().get("holding_weight_g", default)
+        if isinstance(value, bool):
+            raise ValueError("Boolean values are not weights")
+        weight = float(value)
+        if not math.isfinite(weight) or weight < 0:
+            raise ValueError("Weight must be finite and nonnegative")
+        if weight > 0 and 45.0 + 0.15625 * weight > MOTORON_MAX:
+            raise ValueError("Holding output exceeds motor limit")
+        return weight
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        warnings.warn(
+            f"Invalid weights_encoder.holding_weight_g; using {default:g} g",
+            RuntimeWarning, stacklevel=2,
+        )
+        return float(default)
+
+
+HOLDING_WEIGHT_G_DEFAULT = _load_holding_weight_g()
 WEIGHTS_LOAD = 89.3 # Weight of the entire load in Newtons
 WEIGHTS_TOP_DEFAULT = _load_weight_default("top_counts", 5000)
 WEIGHTS_BOTTOM_DEFAULT = _load_weight_default("bottom_counts", 0)
@@ -99,7 +150,7 @@ if _span <= 0 or _span > WEIGHTS_TRAVEL_DEFAULT * 4:
     else:
         WEIGHTS_TOP_DEFAULT = WEIGHTS_BOTTOM_DEFAULT - WEIGHTS_TRAVEL_DEFAULT
 
-WEIGHTS_TOP_DEFAULT = 315
+WEIGHTS_TOP_DEFAULT = 285
 WEIGHTS_SLOW_ZONE_COUNTS = max(1, _load_weight_default("slow_zone_counts", 400))
 WEIGHTS_SLOW_MIN_SCALE = max(0.05, min(1.0, _load_weight_float("slow_zone_scale", 0.25)))
 WEIGHTS_SLOW_TORQUE_FLOOR = max(20, _load_weight_default("slow_zone_torque_floor", 80))
@@ -107,8 +158,11 @@ WEIGHTS_SLOW_TORQUE_FLOOR = max(20, _load_weight_default("slow_zone_torque_floor
 WEIGHTS_BOTTOM_SLOW_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("bottom_slow_speed_pct", 10.0)))
 WEIGHTS_BOTTOM_RETENSION_COUNTS = max(0, _load_weight_default("bottom_retension_coun`ts", 10))
 WEIGHTS_BOTTOM_RETENSION_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("bottom_retension_speed_pct", 20.0)))
+# Position-controlled release coasts after resting on the sample for 1 s.
+WEIGHTS_RELEASE_STATIONARY_S = max(0.1, _load_weight_float("release_stationary_s", 1.0))
+WEIGHTS_RELEASE_STATIONARY_COUNTS = max(0, _load_weight_default("release_stationary_counts", 1))
 PID_LIFT_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("pid_lift_speed_pct", 41)))
-TOP_HOLDING_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("top_lift_speed_pct", 25)))
+TOP_HOLDING_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("top_lift_speed_pct", 20)))
 
 GANTRY_UP_SPEED_MULTIPLIER = 1
 GANTRY_DOWN_SPEED_MULTIPLIER = 0.8
@@ -121,7 +175,7 @@ ADC_OFFSET = calibration_data.get("LVDT", {}).get("adc_offset", 0.)
 PID_CFG = calibration_data.get("weights_pid", {})
 WEIGHTS_PID_KP = float(PID_CFG.get("kp", 1))
 WEIGHTS_PID_GRAVITY_OUTPUT = float(PID_CFG.get("gravity_output", 0.0))
-WEIGHTS_PID_KI = float(PID_CFG.get("ki", 0.005))  # Integral unused (PD control)
+WEIGHTS_PID_KI = float(PID_CFG.get("ki", 0.005))  # Calibration uses Ki=0 for PD control.
 WEIGHTS_PID_KD = float(PID_CFG.get("kd", 0))
 WEIGHTS_PID_DEADBAND = float(PID_CFG.get("deadband_counts", 2.0))
 WEIGHTS_PID_MIN_OUTPUT = float(PID_CFG.get("min_output", 0.0))

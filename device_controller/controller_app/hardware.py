@@ -29,6 +29,7 @@ except Exception as exc:  # pragma: no cover - optional hardware
 class Motoron:
     def __init__(self, address=config.MOTORON_ADDR, bus=config.I2C_BUS, allow_braking=True):
         self.allow_braking = allow_braking
+        self._io_lock = threading.RLock()
         i2c = SMBus(bus)
         try:
             msg = i2c_msg.write(
@@ -91,18 +92,21 @@ class Motoron:
         if s == 0 and not self.allow_braking:
             self.coast_motor(m)
             return
-        self.mc.set_speed(m, s)
+        with self._io_lock:
+            self.mc.set_speed(m, s)
 
     def coast_all(self):
         try:
-            self.mc.coast_now()
+            with self._io_lock:
+                self.mc.coast_now()
         except Exception:
             pass
 
     # Old method use leaves motor with too much momentum, gravity pulling gantry down 
     def coast_motor(self, m: int):
         try:
-            self.mc.set_braking_now(m, 0)
+            with self._io_lock:
+                self.mc.set_braking_now(m, 0)
         except Exception:
             pass
 
@@ -112,13 +116,15 @@ class Motoron:
             self.coast_motor(m)
             return
         try:
-            self.mc.set_braking_now(m, max(0, min(800, int(amount))))
+            with self._io_lock:
+                self.mc.set_braking_now(m, max(0, min(800, int(amount))))
         except Exception:
             pass
 
     def vin_v(self):
         try:
-            return float(self.mc.get_vin_voltage_mv()) / 1000.0
+            with self._io_lock:
+                return float(self.mc.get_vin_voltage_mv()) / 1000.0
         except Exception:
             return float("nan")
 
@@ -210,6 +216,8 @@ class QuadratureEncoder:
 
 
 class ADCReader(threading.Thread):
+    """Read LVDT samples continuously, with no software acquisition-rate cap."""
+
     def __init__(self, bus=config.I2C_BUS, addr=0x48, channel=1, queue_samples=True):
         super().__init__(daemon=True)
         self.enabled = ADC_AVAILABLE
@@ -221,10 +229,10 @@ class ADCReader(threading.Thread):
         self.sample_sink = None
         self.queue_samples = queue_samples
         self.hz = 0.0
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self.channel = channel
 
-        # Per-sample queue so logger can run at ADC max rate
+        # Optional legacy queue; the GUI records through sample_sink instead.
         self.samples: Queue[tuple[float, float, float]] = Queue(maxsize=20000)
 
         if not self.enabled:
@@ -248,8 +256,8 @@ class ADCReader(threading.Thread):
     def run(self):
         if not self.enabled:
             return
-        t0, n = time.time(), 0
-        while not self._stop.is_set():
+        t0, n = time.monotonic(), 0
+        while not self._stop_event.is_set():
             try:
                 v = float(self.adc.get_value(self.channel)) / 100.0
                 self.latest_v = v + config.ADC_OFFSET
@@ -273,25 +281,26 @@ class ADCReader(threading.Thread):
 
             except Exception as exc:
                 self.error = str(exc)
-                time.sleep(0.001)
-                continue
 
-            now = time.time()
+            now = time.monotonic()
             if now - t0 >= 1.0:
                 self.hz = n / (now - t0)
                 n = 0
                 t0 = now
 
+            # Free-run: immediately read the next sample. Conversion and I2C
+            # timing are handled by the ADC driver.
+
     def convert_volt_to_pos(self, v: float) -> float:
         return v * config.LVDT_SLOPE + config.LVDT_INTERCEPT
 
     def stop(self):
-        self._stop.set()
+        self._stop_event.set()
 
 class ATIReader:
     def __init__(self, sensor_num: str = "44297",
                  bias_mode: bool = False,
-                 acquisition_rate: float = 200):
+                 acquisition_rate: float | None = None):
         self.enabled = False
         self.latest_fx: float = 0.0
         self.latest_fy: float = 0.0
@@ -299,7 +308,9 @@ class ATIReader:
         self.hz: float = 0.0
         self._sensor_num = sensor_num
         self._bias_mode = bias_mode
-        self._acquisition_rate = acquisition_rate
+        self._acquisition_rate = (
+            config.LABJACK_ACQUISITION_HZ if acquisition_rate is None else acquisition_rate
+        )
         self._sensor: LabjackATIReader | None = None
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()

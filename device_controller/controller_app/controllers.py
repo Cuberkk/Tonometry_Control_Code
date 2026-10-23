@@ -1,10 +1,11 @@
-"""Control abstractions for manual axes and PD-governed weights."""
+"""Control abstractions for manual axes and position PID weights control."""
 
 from __future__ import annotations
 
 import math
 import threading
 import time
+from collections import deque
 from typing import Optional
 
 from . import config
@@ -137,7 +138,7 @@ class PIDController:
         return u_sat
 
 class WeightsPositionController:
-    """Encoder-based positioning for the weights axis using PD instead of hardware braking."""
+    """Position PID while moving, followed by fixed holding or release."""
 
     def __init__(self, motor: Motoron, motor_id: int, encoder, invert: bool, torque_floor: int = 250, refresh_hz: float = 200.0):
         if encoder is None:
@@ -152,14 +153,17 @@ class WeightsPositionController:
         self.tolerance_counts = config.WEIGHTS_TOLERANCE_DEFAULT
         self.top_holding_speed_pct = config.TOP_HOLDING_SPEED_PCT
         self._target = None
-        self._arrive_flag = None
+        self.pre_target = None
+        self._arrive_flag = False
+        self._released = False
+        self._release_at_rest = False
+        self._stationary_samples = deque()
+        self._failure_reason = ""
         self._state = "idle"
         self._last_cmd = 0
         self._estopped = False
-        self.pre_target = None
         self._shutdown = threading.Event()
         self._pause = threading.Event()
-        self._pause.clear()
         self._lock = threading.Lock()
         self.pid = PIDController(
             config.WEIGHTS_PID_KP,
@@ -185,58 +189,71 @@ class WeightsPositionController:
     @property
     def target_position(self) -> Optional[int]:
         with self._lock:
-            return None if self._target is None else int(self._target)
+            return self._target
+
+    @property
+    def failure_reason(self) -> str:
+        with self._lock:
+            return self._failure_reason
 
     def set_speed_percent(self, pct: float):
         self.speed_percent = max(5.0, min(100.0, float(pct)))
 
     def set_tolerance(self, counts: int):
-        counts = int(counts)
-        self.tolerance_counts = max(1, counts)
+        self.tolerance_counts = max(1, int(counts))
 
-    def move_to(self, target: int):
-        if self._estopped:
-            return
+    def move_to(self, target: int, *, release_at_rest: bool = False,
+                cancel_events: tuple[threading.Event, ...] = ()):
+        """Position-control a move; bottom moves coast on arrival or rest."""
         with self._lock:
+            if self._estopped or any(event.is_set() for event in cancel_events):
+                return
+            self._released = False
+            self._release_at_rest = bool(release_at_rest)
+            self._stationary_samples.clear()
+            self._failure_reason = ""
             self._arrive_flag = False
             self.pid.reset()
             self._target = int(target)
-        self._state = "queued"
+            self.pre_target = int(target)
+            self._state = "queued"
+
+    def _cancel_target_locked(self):
+        self._target = None
+        self.pre_target = None
+        self._release_at_rest = False
+        self._stationary_samples.clear()
+        self._arrive_flag = False
+        self.pid.reset()
 
     def stop(self, *, coast: bool = False):
         with self._lock:
-            self._target = None
-            if not self.motor.allow_braking:
-                self.pre_target = None
-                self._arrive_flag = False
-        self.pid.reset()
-        self._last_cmd = 0
-        if coast:
-            self.motor.brake_motor(self.motor_id, config.BRAKE_FLOOR)
-            self._state = "coast"
-        else:
-            self.motor.set_speed(self.motor_id, 0)
-            self._state = "idle"
+            self._cancel_target_locked()
+            self._released = bool(coast)
+            if coast:
+                self.motor.coast_motor(self.motor_id)
+            else:
+                self.motor.set_speed(self.motor_id, 0)
+            self._last_cmd = 0
+            self._state = "released" if coast else "idle"
+
+    def release(self):
+        """Cancel the position target and coast without a retained hold."""
+        self.stop(coast=True)
 
     def set_estop(self, active: bool):
-        self._estopped = bool(active)
-        if active:
-            with self._lock:
-                self._target = None
-            self.pid.reset()
+        with self._lock:
+            self._estopped = bool(active)
+            self._cancel_target_locked()
+            self._released = True
             self.motor.coast_motor(self.motor_id)
             self._last_cmd = 0
-            self._state = "estopped"
-        else:
-            self._state = "idle"
+            self._state = "estopped" if active else "released"
 
     def shutdown(self):
         self._shutdown.set()
         self._pause.set()
-        try:
-            self._thread.join(timeout=1.0)
-        except Exception:
-            pass
+        self._thread.join(timeout=1.0)
         self.stop(coast=True)
 
     def _loop(self):
@@ -247,70 +264,92 @@ class WeightsPositionController:
             if self._shutdown.is_set():
                 break
             now = time.monotonic()
-            dt = max(1e-3, now - last_time)
+            dt = min(0.05, max(1e-3, now - last_time))
             last_time = now
-
-            if self._estopped:
-                self.motor.coast_motor(self.motor_id)
-                self._last_cmd = 0
-                self.pid.reset()
-                time.sleep(0.1)
-                continue
-
+            # Serialize PID state and motor writes with move, stop and E-stop.
             with self._lock:
-                target = self._target
+                if not self._pause.is_set():
+                    continue
+                try:
+                    if self._estopped or self._released:
+                        self.motor.coast_motor(self.motor_id)
+                        self._last_cmd = 0
+                    elif self._target is None:
+                        self._apply_holding_command(self.pre_target)
+                        self._state = "holding" if self.pre_target is not None and self.pre_target > 0 else "idle"
+                    else:
+                        current = int(self.encoder.get_position())
+                        self._run_position_move_locked(current, now, dt)
+                except Exception as exc:
+                    self._failure_reason = str(exc) or type(exc).__name__
+                    self._cancel_target_locked()
+                    self._released = True
+                    self._state = "control error"
+                    self._last_cmd = 0
+                    try:
+                        self.motor.coast_motor(self.motor_id)
+                    except Exception:
+                        pass
+            self._shutdown.wait(sleep_base)
 
-            if target is None:
-                self._apply_holding_command(self.pre_target)
-                self.pid.reset()
-                if self._state != "idle":
-                    self._state = "idle"
-                time.sleep(0.1)
-                continue
-            
-            self.pre_target = target
-            self._arrive_flag = False
-            try:
-                current = self.encoder.get_position()
-            except Exception as exc:
-                self._state = f"encoder error: {exc}"
-                self.motor.brake_motor(self.motor_id, config.BRAKE_FLOOR)
-                self._last_cmd = 0
-                time.sleep(0.2)
-                continue
-
-            error = int(target) - current
-            holding = abs(error) <= self.tolerance_counts
-            if holding:
-                with self._lock:
-                    self._target = None
+    def _run_position_move_locked(self, current: int, now: float, dt: float):
+        target = self._target
+        if target is None:
+            return
+        error = target - current
+        at_target = abs(error) <= self.tolerance_counts
+        if self._release_at_rest:
+            # A bottom move may reach the sample before the encoder target.
+            # Coast once it rests for the configured duration, or passes bottom.
+            samples = self._stationary_samples
+            samples.append((now, current))
+            cutoff = now - config.WEIGHTS_RELEASE_STATIONARY_S
+            while len(samples) > 2 and samples[1][0] <= cutoff:
+                samples.popleft()
+            duration = samples[-1][0] - samples[0][0]
+            positions = [sample[1] for sample in samples]
+            at_rest = (
+                duration >= config.WEIGHTS_RELEASE_STATIONARY_S
+                and max(positions) - min(positions) <= config.WEIGHTS_RELEASE_STATIONARY_COUNTS
+            )
+            if current <= target + self.tolerance_counts or at_rest:
+                self.motor.coast_motor(self.motor_id)
+                self._cancel_target_locked()
+                self._released = True
                 self._arrive_flag = True
-                self._state = "at target"
-                self._apply_holding_command(target)
-                self.pid.reset()
+                self._last_cmd = 0
+                self._state = "released"
+                return
+        elif at_target:
+            self._apply_holding_command(target)
+            self._target = None
+            self._arrive_flag = True
+            self._state = "at target"
+            self.pid.reset()
+            return
 
-                time.sleep(sleep_base)
-                continue
-            else:
-                self._state = "moving_up" if error > 0 else "moving_down"
+        self._state = "moving_up" if error > 0 else "moving_down"
+        command = self._compute_pid_command(error, dt)
+        self.motor.set_speed(self.motor_id, command)
+        self._last_cmd = command
 
-            cmd = self._compute_pid_command(error, dt)
-            self._last_cmd = cmd
-
-            self.motor.set_speed(self.motor_id, cmd)
-            time.sleep(sleep_base)
+    def _holding_command(self) -> float:
+        return max(
+            0.0,
+            min(float(config.MOTORON_MAX),
+                (self.top_holding_speed_pct / 100.0) * config.MOTORON_MAX),
+        )
 
     def _apply_holding_command(self, target):
-        """Apply the existing holding policy immediately and report its output."""
-        cmd = (int((self.top_holding_speed_pct / 100.0) * config.MOTORON_MAX)
-               if target is not None and target > 0 else 0)
-        self.motor.set_speed(self.motor_id, cmd)
-        self._last_cmd = cmd
+        logical_command = int(self._holding_command()) if target is not None and target > 0 else 0
+        motor_command = -logical_command if self.invert else logical_command
+        self.motor.set_speed(self.motor_id, motor_command)
+        self._last_cmd = motor_command
 
     def _compute_pid_command(self, error: float, dt: float) -> int:
         output = self.pid.compute(error, dt)
-        # Positive targets lift the weights; bottom target 0 keeps its existing policy.
-        if self.pre_target is not None and self.pre_target > 0:
+        # Use moving compensation only when lifting to a positive target.
+        if not self._release_at_rest and self.pre_target is not None and self.pre_target > 0:
             output += self.gravity_output
         max_cmd = self._max_output()
         output = max(-max_cmd, min(max_cmd, output))
