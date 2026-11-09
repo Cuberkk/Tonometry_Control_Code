@@ -225,3 +225,4 @@ __marimo__/
 logs/
 tests/
 Codex_Docs/
+.DS_Store
