@@ -1,4 +1,4 @@
-"""Native LVDT despiking, linear timestamp alignment and creep cycle export."""
+"""Native LVDT despiking, timestamp alignment and steady-force cycle export."""
 
 from pathlib import Path
 import re
@@ -237,21 +237,123 @@ def detect_indentation_cycles(trial_dir, trial, *, method="auto", force_settings
     return cycles
 
 
-def extract_indentation_cycles(sync, cycles, sampling_hz=200.):
+def segment_force_steady_state(sync, cycles, *, stability_window_s=.5,
+                               stable_confirm_s=.5, level_tolerance_fraction=.05,
+                               stable_std_fraction=.03, stable_slope_fraction=.05,
+                               plateau_tail_s=5., release_guard_s=.25,
+                               min_force_n=.2):
+    """Locate one continuous, confirmed steady-force hold within each cycle.
+
+    Estimate the plateau from the last ``plateau_tail_s`` seconds before the
+    guarded release boundary. Trailing full-window force mean, standard
+    deviation and linear-regression slope must meet their relative limits for
+    ``stable_confirm_s`` seconds. The retained interval starts at the first
+    qualifying diagnostic sample and ends at guarded release, or before the
+    first subsequently sustained instability. Brief fluctuations are retained;
+    no rows are deleted, and neither measured signal is smoothed or re-zeroed.
+
+    Return the original cycle metadata plus ``steady_start_s``, exclusive
+    ``steady_end_s`` and the plateau reference ``steady_force_n``. Slope limits
+    are fractions of the plateau force per second.
+    """
+    settings = (stability_window_s, stable_confirm_s, level_tolerance_fraction,
+                stable_std_fraction, stable_slope_fraction, plateau_tail_s,
+                min_force_n)
+    if not np.isfinite(settings).all() or min(settings) <= 0:
+        raise ValueError("Steady-force windows, tolerances and minimum force must be finite and positive.")
+    if not np.isfinite(release_guard_s) or release_guard_s < 0:
+        raise ValueError("release_guard_s must be finite and nonnegative.")
+    if level_tolerance_fraction >= 1:
+        raise ValueError("level_tolerance_fraction must be less than one.")
+    required = {"time_s", "force_n", "displacement_mm"}
+    if not required.issubset(sync.columns):
+        raise ValueError(f"Synchronized data requires columns {sorted(required)}.")
+    if cycles.empty or not {"cycle", "onset_s", "release_s"}.issubset(cycles.columns):
+        raise ValueError("Provide at least one cycle with cycle, onset_s and release_s columns.")
+    t = sync.time_s.to_numpy(float)
+    if len(t) < 3 or not np.isfinite(t).all():
+        raise ValueError("Steady-force segmentation requires at least three finite timestamps.")
+    dt = float(np.median(np.diff(t)))
+    if dt <= 0 or not np.allclose(np.diff(t), dt, rtol=1e-7, atol=1e-10):
+        raise ValueError("Steady-force segmentation requires a continuous uniform time grid.")
+    window = max(3, int(np.ceil(stability_window_s / dt)))
+    confirm = max(1, int(np.ceil(stable_confirm_s / dt)))
+    centered_time = (np.arange(window) - (window - 1) / 2) * dt
+    slope_weights = centered_time / np.sum(centered_time**2)
+    rows = []
+    for event in cycles.itertuples():
+        stop_s = event.release_s - release_guard_s
+        if (not np.isfinite([event.onset_s, event.release_s]).all()
+                or event.onset_s >= stop_s
+                or event.onset_s < t[0] - dt - 1e-10
+                or event.release_s > t[-1] + dt + 1e-10):
+            raise ValueError(f"Cycle {event.cycle}: Invalid or uncovered indentation boundaries.")
+        segment = sync.loc[(sync.time_s >= event.onset_s) & (sync.time_s < stop_s)]
+        if len(segment) < window + confirm - 1:
+            raise ValueError(f"Cycle {event.cycle}: Too few samples to confirm a steady-force hold.")
+        local_t = segment.time_s.to_numpy(float)
+        force = segment.force_n.to_numpy(float)
+        tail = force[local_t >= stop_s - plateau_tail_s]
+        finite_tail = tail[np.isfinite(tail)]
+        if finite_tail.size < 3:
+            raise ValueError(f"Cycle {event.cycle}: The plateau reference has fewer than three finite force samples.")
+        level = float(np.median(finite_tail))
+        if level < min_force_n:
+            raise ValueError(f"Cycle {event.cycle}: No positive loaded plateau above min_force_n.")
+        rolling_force = pd.Series(force).rolling(window, min_periods=window)
+        mean = rolling_force.mean().to_numpy()
+        std = rolling_force.std(ddof=0).to_numpy()
+        slope = np.full(len(force), np.nan)
+        slope[window - 1:] = np.correlate(force, slope_weights, mode="valid")
+        stable = ((np.abs(mean - level) <= level_tolerance_fraction * level)
+                  & (std <= stable_std_fraction * level)
+                  & (np.abs(slope) <= stable_slope_fraction * level))
+        starts = np.flatnonzero(stable & ~np.r_[False, stable[:-1]])
+        ends = np.flatnonzero(stable & ~np.r_[stable[1:], False]) + 1
+        confirmed = np.flatnonzero(ends - starts >= confirm)
+        if not len(confirmed):
+            raise ValueError(f"Cycle {event.cycle}: No confirmed steady-force interval; review the stability settings.")
+        first = int(starts[confirmed[0]])
+        unstable = ~stable
+        bad_starts = np.flatnonzero(unstable & ~np.r_[False, unstable[:-1]])
+        bad_ends = np.flatnonzero(unstable & ~np.r_[unstable[1:], False]) + 1
+        sustained = bad_starts[(bad_starts > first) & (bad_ends - bad_starts >= confirm)]
+        stop = int(sustained[0]) if len(sustained) else len(segment)
+        retained = segment.iloc[first:stop]
+        if (len(retained) < max(2, confirm)
+                or not np.isfinite(retained[["force_n", "displacement_mm"]].to_numpy(float)).all()):
+            raise ValueError(f"Cycle {event.cycle}: Missing sensor values or insufficient steady-force samples. "
+                             "Review native sensor gaps before exporting.")
+        rows.append({"steady_start_s": float(local_t[first]),
+                     "steady_end_s": float(local_t[stop]) if stop < len(segment) else float(stop_s),
+                     "steady_force_n": level})
+    return cycles.assign(**{key: [row[key] for row in rows] for key in rows[0]})
+
+
+def extract_indentation_cycles(sync, cycles, sampling_hz=200., *, steady_only=False):
     """Return exactly three columns on a continuous cycle-relative time grid.
 
     Preserve the trial-wide force/displacement baseline, including residual
     indentation in later cycles. Reject gaps instead of dropping samples or
     interpolating across unsupported intervals. The release boundary is strict.
+    With ``steady_only=True``, use the confirmed steady-force boundaries from
+    ``segment_force_steady_state`` and set time zero at the first retained sample.
     """
     if not np.isfinite(sampling_hz) or sampling_hz <= 0:
         raise ValueError("sampling_hz must be finite and positive.")
     dt = 1. / sampling_hz
     if len(sync) < 2 or not np.allclose(np.diff(sync.time_s), dt, rtol=1e-7, atol=1e-10):
         raise ValueError(f"Synchronized timestamps must be spaced at {dt:g} s.")
+    if steady_only and not {"steady_start_s", "steady_end_s"}.issubset(cycles.columns):
+        raise ValueError("Run segment_force_steady_state before exporting steady-force intervals.")
     extracted = []
     for event in cycles.itertuples():
-        segment = sync.loc[(sync.time_s >= event.onset_s) & (sync.time_s < event.release_s)]
+        start = event.steady_start_s if steady_only else event.onset_s
+        stop = event.steady_end_s if steady_only else event.release_s
+        if (not np.isfinite([start, stop]).all() or start >= stop
+                or start < event.onset_s or stop > event.release_s):
+            raise ValueError(f"Cycle {event.cycle}: Export boundaries must lie within the indentation cycle.")
+        segment = sync.loc[(sync.time_s >= start) & (sync.time_s < stop)]
         values = segment[["displacement_mm", "force_n"]].to_numpy(float)
         if len(segment) < 2 or not np.isfinite(values).all():
             raise ValueError(f"Cycle {event.cycle}: Missing sensor values or fewer than two samples. "
