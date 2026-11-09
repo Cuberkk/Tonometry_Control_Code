@@ -226,3 +226,4 @@ logs/
 tests/
 Codex_Docs/
 .DS_Store
+data_process/analysis_outputs/

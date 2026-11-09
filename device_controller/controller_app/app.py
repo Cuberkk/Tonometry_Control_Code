@@ -95,7 +95,7 @@ class ControllerApp(tk.Tk):
         self.pid_deadband = tk.DoubleVar(value=config.WEIGHTS_PID_DEADBAND)
         self.pid_min_output = tk.DoubleVar(value=config.WEIGHTS_PID_MIN_OUTPUT)
 
-        self.save_directory = tk.StringVar(value=str(config.REPO_ROOT))
+        self.save_directory = tk.StringVar(value=str(config.REPO_ROOT / "data" / "Clindent_Data"))
         self.user_number = tk.StringVar(value="0")
         self.trial_number = tk.StringVar(value="0")
         self.seq_cycles = tk.IntVar(value=3)

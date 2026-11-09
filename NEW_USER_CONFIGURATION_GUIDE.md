@@ -35,7 +35,7 @@ Line numbers below refer to the source checked when this guide was updated. `pat
 | Startup Bottom / tolerance | `calibration.json:31` / `calibration.json:35` | Encoder counts; GUI Save Targets persists edits |
 | Startup holding weight | `calibration.json` → `weights_encoder.holding_weight_g` | Defaults to 400 g; restart GUI after editing |
 | Default cycles / Top dwell / Bottom dwell | `device_controller/controller_app/app.py:98–100` | Startup values; dwell times in seconds |
-| Default project directory | `device_controller/controller_app/app.py:95` | Startup recording folder |
+| Default project directory | `device_controller/controller_app/app.py` → `self.save_directory` | Defaults to `<Project root>/data/Clindent_Data`; recordings go under `User_Data` |
 | Default User / Trial | `device_controller/controller_app/app.py:96–97` | Currently both `"0"` |
 | Displacement Y limits | `device_controller/controller_app/app.py:224` and `:633` | Change both initialization and render limits |
 | Force Y limits | `device_controller/controller_app/app.py:349` and `:401` | Change both initialization and render limits |
@@ -91,6 +91,8 @@ You can still change the field in the GUI and apply it with Enter or by leaving 
 ## How do I choose the save directory and filenames?
 
 **Code location:** Recording input defaults: `device_controller/controller_app/app.py:95–97`. GUI input widgets: `app.py:576–584`. Recording path construction starts at `app.py:1152`.
+
+**Project directory** defaults to `<Project root>/data/Clindent_Data`, so the default user-study storage path is `data/Clindent_Data/User_Data` relative to the project root.
 
 Fill in **User #**, **Trial #**, and **Project directory**, or use **Browse...**. For User 2 and Trial 5:
 
@@ -221,7 +223,7 @@ Use each sensor file's `elapsed_time` column. From the project root:
 import csv
 from pathlib import Path
 
-path = Path("User_Data/User0/Trial0/LVDT.csv")
+path = Path("data/Clindent_Data/User_Data/User0/Trial0/LVDT.csv")
 with path.open() as file:
     rows = list(csv.DictReader(file))
 
