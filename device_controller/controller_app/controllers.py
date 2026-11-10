@@ -165,10 +165,11 @@ class WeightsPositionController:
         self._shutdown = threading.Event()
         self._pause = threading.Event()
         self._lock = threading.Lock()
+        kp, ki, kd = config.pid_gains_for_weight(config.HOLDING_WEIGHT_G_DEFAULT)
         self.pid = PIDController(
-            config.WEIGHTS_PID_KP,
-            config.WEIGHTS_PID_KI,
-            config.WEIGHTS_PID_KD,
+            kp,
+            ki,
+            kd,
             output_limits=(-config.MOTORON_MAX, config.MOTORON_MAX),
             integral_limits=(-config.WEIGHTS_PID_I_LIM, config.WEIGHTS_PID_I_LIM),
         )
@@ -198,6 +199,19 @@ class WeightsPositionController:
 
     def set_speed_percent(self, pct: float):
         self.speed_percent = max(5.0, min(100.0, float(pct)))
+
+    def set_weight_profile(self, weight_g: float, holding_speed_pct: float,
+                           speed_percent: float | None = None):
+        kp, ki, kd = config.pid_gains_for_weight(weight_g)
+        gravity_output = config.moving_gravity_compensation(weight_g)
+        with self._lock:
+            if speed_percent is not None:
+                self.speed_percent = max(5.0, min(100.0, float(speed_percent)))
+            self.top_holding_speed_pct = float(holding_speed_pct)
+            self.gravity_output = gravity_output
+            if (self.pid.kp, self.pid.ki, self.pid.kd) != (kp, ki, kd):
+                self.pid.kp, self.pid.ki, self.pid.kd = kp, ki, kd
+                self.pid.reset()
 
     def set_tolerance(self, counts: int):
         self.tolerance_counts = max(1, int(counts))

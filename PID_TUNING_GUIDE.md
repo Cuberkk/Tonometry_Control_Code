@@ -51,7 +51,7 @@ final output = requested output limited to the allowed range
 
 Feedforward supplies a baseline; feedback corrects the remaining error. Raising Kp or imposing a large minimum output is not equivalent to correctly compensating gravity.
 
-The current software adds `gravity_output` for positive-position targets before limiting the command. Target 0 does not receive that addition. This target-dependent rule is specific to the present setup and may not be appropriate if the coordinate system or target meanings change.
+The GUI selects moving gravity compensation from `weights_pid.gravity_compensation_400g` and `gravity_compensation_800g`: 400 g gives 137.5, 800 g gives 170, and other positive weights follow the line through those points. A 0 g weight gives 0 compensation. The controller adds the selected value for positive-position targets before limiting the command; target 0 does not receive that addition. This target-dependent rule is specific to the present setup and may not be appropriate if the coordinate system or target meanings change. Holding output after arrival is configured separately.
 
 ## 3. How this repository implements control
 
@@ -59,10 +59,10 @@ The current software adds `gravity_output` for positive-position targets before 
 | --- | --- |
 | PID calculation, integral clamp, and anti-windup | `device_controller/controller_app/controllers.py`, class `PIDController`, methods `reset()` and `compute()` |
 | Weight controller frequency setting | `controllers.py:142`, `refresh_hz=200.0` |
-| Movement command and feedforward | `controllers.py:310`, `_compute_pid_command()` |
+| Movement command and feedforward | `controllers.py`, `_compute_pid_command()` |
 | Fixed-output holding after arrival | `controllers.py:303`, `_apply_holding_command()` |
-| Active PID settings | Root `calibration.json:38–45` |
-| PID configuration loading | `device_controller/controller_app/config.py:121–128` |
+| Active PID settings | Root `calibration.json` → `weights_pid` (other weights) and `weights_pid.gains_800g` (800 g) |
+| PID configuration loading | `device_controller/controller_app/config.py`, `_load_moving_gravity_point()` and `moving_gravity_compensation()` |
 | Speed and holding limits | `config.py:107`, `:110–111` |
 | Arrival tolerance | `calibration.json:35`, `weights_encoder.tolerance_counts` |
 
@@ -73,15 +73,17 @@ Current PID configuration:
 ```json
 "weights_pid": {
   "deadband_counts": 8.0,
-  "kd": 0.04,
+  "kd": 0.08,
   "ki": 0.0,
-  "kp": 1.0,
+  "kp": 0.6,
+  "gains_800g": {"kd": 0.04, "ki": 0.0, "kp": 1.0},
   "min_output": 0.0,
-  "gravity_output": 170.0
+  "gravity_compensation_400g": 137.5,
+  "gravity_compensation_800g": 170.0
 }
 ```
 
-These are the current experimental settings, not a completed tuning result. Preserve the rest of `calibration.json` when editing this section, then restart the application. Shared configuration changes affect other applications using these controller modules.
+The flat gains apply to weights other than exactly 800 g; at 800 g, the GUI selects `gains_800g` from **Holding weight (g)**. These are experimental settings, not a completed tuning result. Preserve the rest of `calibration.json` when editing this section, then restart the application. Shared configuration changes affect other applications using these controller modules.
 
 ### Important implementation details
 
@@ -95,7 +97,7 @@ These are the current experimental settings, not a completed tuning result. Pres
 
 ## 4. Understand the output limits before tuning
 
-With `MOTORON_MAX=600`, a 41% lifting limit is approximately 246 command units; floating-point truncation can produce 245. The automatic downward limit is 10%, approximately 60.
+With `MOTORON_MAX=600`, the non-800 g command limit of 30% is 180 units and the 800 g limit of 50% is 300 units. At 800 g, the 170 compensation leaves 130 command units for positive PID correction before reaching that limit. The automatic downward limit is 10%, approximately 60.
 
 A large `min_output` can destroy smooth control. Previously, `min_output=400` exceeded both limits. Small nonzero corrections were pushed to the available limit, producing abrupt positive/negative commands.
 

@@ -33,7 +33,7 @@ Line numbers below refer to the source checked when this guide was updated. `pat
 | --- | --- | --- |
 | Startup Top target | `device_controller/controller_app/config.py:102`; JSON value at `calibration.json:36` is currently overridden | Encoder counts; GUI target field changes the active value |
 | Startup Bottom / tolerance | `calibration.json:31` / `calibration.json:35` | Encoder counts; GUI Save Targets persists edits |
-| Startup holding weight | `calibration.json` → `weights_encoder.holding_weight_g` | Defaults to 400 g; restart GUI after editing |
+| Startup holding weight | `calibration.json` → `weights_encoder.holding_weight_g` | Currently 800 g; restart GUI after editing |
 | Default cycles / Top dwell / Bottom dwell | `device_controller/controller_app/app.py:98–100` | Startup values; dwell times in seconds |
 | Default project directory | `device_controller/controller_app/app.py` → `self.save_directory` | Defaults to `<Project root>/data/Clindent_Data`; recordings go under `User_Data` |
 | Default User / Trial | `device_controller/controller_app/app.py:96–97` | Currently both `"0"` |
@@ -47,10 +47,10 @@ Line numbers below refer to the source checked when this guide was updated. `pat
 | ATI sensor number | `device_controller/controller_app/app.py` → `_ati_worker()` | Calibration selector 44297 |
 | LVDT conversion delay | `device_controller/controller_app/hardware.py:237` | Seconds; currently 0.0012 |
 | Encoder/control log interval | `device_controller/controller_app/app.py:1239` | 0.005 seconds requests 200 Hz |
-| PID Kp / Ki / Kd | `calibration.json:42` / `:41` / `:40` | Movement gains |
-| Minimum PID output / gravity feedforward | `calibration.json:43–44` | Currently 0 and 170 |
+| PID Kp / Ki / Kd | `calibration.json` → `weights_pid.kp/ki/kd`, `weights_pid.gains_800g` | Flat gains apply to all weights except 800 g; nested gains apply at exactly 800 g; restart after editing |
+| Minimum PID output / moving gravity compensation | `calibration.json` → `weights_pid.min_output`, `gravity_compensation_400g`, `gravity_compensation_800g` | 400 g maps to 137.5; 800 g maps to 170; restart GUI after editing |
 | Gravity compensation implementation | `device_controller/controller_app/controllers.py:310–314` | Added before command clamping for positive targets |
-| Lift / automatic downward speed defaults | `device_controller/controller_app/config.py:110` / `:107` | JSON keys may override these defaults |
+| Weight command limit / automatic downward cap | `calibration.json` → `weights_encoder.pid_lift_speed_pct`, `pid_lift_speed_pct_800g`; `device_controller/controller_app/config.py` → `WEIGHTS_BOTTOM_SLOW_SPEED_PCT` | 30% for non-800 g, 50% for exactly 800 g; Bottom is capped separately |
 | Top holding output default | `calibration.json` → `weights_encoder.holding_weight_g` | GUI derives holding output from the configured weight |
 | Manual downward speed | `device_controller/controller_app/config.py:130` | Manual downward percentage |
 | Gantry direction speed multipliers | `device_controller/controller_app/config.py:113–114` | Upward and downward multipliers |
@@ -254,22 +254,26 @@ The `Force.csv` and `LVDT.csv` writers receive successful acquisition samples di
 
 ## How do I adjust the PID parameters?
 
-**Code location:** `calibration.json:38–45`. Configuration loading: `device_controller/controller_app/config.py:121–128`. Gravity addition: `controllers.py:310–314`.
+**Code location:** `calibration.json` → `weights_pid`; configuration loading: `device_controller/controller_app/config.py`; gravity addition: `device_controller/controller_app/controllers.py` → `_compute_pid_command()`.
 
 Edit the root `calibration.json`, preserving all other sections:
 
 ```json
 "weights_pid": {
   "deadband_counts": 8.0,
-  "kd": 0.04,
+  "kd": 0.08,
   "ki": 0.0,
-  "kp": 1.0,
+  "kp": 0.6,
+  "gains_800g": {"kd": 0.04, "ki": 0.0, "kp": 1.0},
   "min_output": 0.0,
-  "gravity_output": 170.0
+  "gravity_compensation_400g": 137.5,
+  "gravity_compensation_800g": 170.0
 }
 ```
 
-Restart after editing. These settings are shared by applications using the same controller/configuration modules.
+The flat `kp`, `ki`, and `kd` values apply to every weight except exactly 800 g. At 800 g, the GUI selects `gains_800g` when **Holding weight (g)** is applied. Restart after editing `calibration.json`. These settings are shared by applications using the same controller/configuration modules.
+
+The GUI calculates moving gravity compensation from the two configured points: 400 g gives 137.5 and 800 g gives 170. Other positive weights follow the straight line through those points (for example, 600 g gives 153.75); 0 g gives 0. This compensation is added while lifting toward a positive target, then limited by the configured movement speed. `gravity_output`, if present in an older JSON file, is only an initial controller fallback; edit the two `gravity_compensation_*` values to change the GUI mapping.
 
 | Value | Meaning in this implementation |
 | --- | --- |
@@ -277,7 +281,7 @@ Restart after editing. These settings are shared by applications using the same 
 | `ki` | Integral correction; currently disabled. |
 | `kd` | Correction based on the rate of change of error. |
 | `min_output` | Raises small nonzero PID commands to a minimum magnitude; currently disabled. |
-| `gravity_output` | Feedforward added for positive-position targets before output clamping. |
+| `gravity_compensation_400g`, `gravity_compensation_800g` | Moving feedforward at 400 g and 800 g; the GUI calculates values for other positive weights from these points. |
 | `deadband_counts` | Loaded into the controller but currently not applied in `_compute_pid_command()`; changing it does not currently implement a PID deadband. |
 
 Do not restore the previous `min_output=400` to solve an upward stall. It exceeded movement limits and caused small errors to generate saturated commands. Trial2 stalled at output 162 after removing that floor; adding gravity feedforward 170 allowed Trial3 to reach tolerance. That value is load-dependent, not a universal setting.
@@ -290,15 +294,16 @@ Change one parameter at a time, record to a new Trial, and compare arrival time,
 
 Manual operation uses its speed setting, with a separate downward override. Automatic moves temporarily apply configuration-defined limits.
 
-The following optional entries belong under `weights_encoder` in `calibration.json`:
+The following entries belong under `weights_encoder` in `calibration.json` (the values shown are the current configuration or fallback):
 
-| JSON key | Default | Used for |
+| JSON key | Value | Used for |
 | --- | ---: | --- |
-| `pid_lift_speed_pct` | 41 | Automatic lift limit |
+| `pid_lift_speed_pct` | 30 | Automatic command limit for weights other than 800 g |
+| `pid_lift_speed_pct_800g` | 50 | Automatic command limit for exactly 800 g |
 | `bottom_slow_speed_pct` | 10 | Automatic move to Bottom |
 | `top_lift_speed_pct` | 20 | Controller holding fallback; GUI overrides it using `holding_weight_g` |
 
-The limit is approximately `percentage / 100 * MOTORON_MAX`; with maximum 600, 41% gives 246 before integer truncation. Existing float arithmetic can produce a logged value of 245. These are driver command units, not measured RPM or percent torque.
+The limit is approximately `percentage / 100 * MOTORON_MAX`; with maximum 600, 30% gives 180 command units and 50% gives 300. Since the startup weight is 800 g, the GUI **Command limit** slider initially shows 50%. These are driver command units, not measured RPM or percent torque.
 
 `MANUAL_DOWN_SPEED_PCT` in `config.py` separately controls manual downward operation. Gantry direction multipliers are also in `config.py`. Avoid changing `MOTORON_MAX` as a substitute for choosing the correct per-mode speed limit.
 
@@ -306,9 +311,9 @@ The limit is approximately `percentage / 100 * MOTORON_MAX`; with maximum 600, 4
 
 **Code location:** Holding output default: `device_controller/controller_app/config.py:111`. Holding implementation: `controllers.py:303–308`.
 
-After arrival, the current controller exits movement PID and applies fixed holding output. Changing movement `gravity_output` does not change that holding policy.
+After arrival, the current controller exits movement PID and applies fixed holding output. Changing the moving `gravity_compensation_400g` or `gravity_compensation_800g` values does not change that holding policy.
 
-The GUI derives the holding request from **Holding weight (g)**. The default 400 g requests command 107.5 before integer conversion (about 17.92% of maximum 600). Trial3 showed continued upward displacement during dwell. Increasing Kp/Kd does not directly fix drift after movement PID has exited; holding requires a separate evaluation or closed-loop holding implementation.
+The GUI derives the holding request from **Holding weight (g)**. A 400 g input requests command 107.5 before integer conversion (about 17.92% of maximum 600). Trial3 showed continued upward displacement during dwell. Increasing Kp/Kd does not directly fix drift after movement PID has exited; holding requires a separate evaluation or closed-loop holding implementation.
 
 ## Can the GUI electrically brake/short the motor?
 

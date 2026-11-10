@@ -161,7 +161,15 @@ WEIGHTS_BOTTOM_RETENSION_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("bot
 # Position-controlled release coasts after resting on the sample for 1 s.
 WEIGHTS_RELEASE_STATIONARY_S = max(0.1, _load_weight_float("release_stationary_s", 1.0))
 WEIGHTS_RELEASE_STATIONARY_COUNTS = max(0, _load_weight_default("release_stationary_counts", 1))
-PID_LIFT_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("pid_lift_speed_pct", 41)))
+
+
+def pid_lift_speed_pct_for_weight(weight_g: float) -> float:
+    base = _load_weight_float("pid_lift_speed_pct", 41)
+    pct = _load_weight_float("pid_lift_speed_pct_800g", base) if weight_g == 800.0 else base
+    return max(5.0, min(100.0, pct))
+
+
+PID_LIFT_SPEED_PCT = pid_lift_speed_pct_for_weight(HOLDING_WEIGHT_G_DEFAULT)
 TOP_HOLDING_SPEED_PCT = max(5.0, min(100.0, _load_weight_float("top_lift_speed_pct", 20)))
 
 GANTRY_UP_SPEED_MULTIPLIER = 1
@@ -173,10 +181,65 @@ LVDT_VOLTAGE_SCALE = float(calibration_data.get("LVDT", {}).get("voltage_scale",
 ADC_OFFSET = calibration_data.get("LVDT", {}).get("adc_offset", 0.)
 
 PID_CFG = calibration_data.get("weights_pid", {})
-WEIGHTS_PID_KP = float(PID_CFG.get("kp", 1))
-WEIGHTS_PID_GRAVITY_OUTPUT = float(PID_CFG.get("gravity_output", 0.0))
-WEIGHTS_PID_KI = float(PID_CFG.get("ki", 0.005))  # Calibration uses Ki=0 for PD control.
-WEIGHTS_PID_KD = float(PID_CFG.get("kd", 0))
+
+
+def pid_gains_for_weight(weight_g: float) -> tuple[float, float, float]:
+    """Select the 800 g gains or the default gains for every other weight."""
+    base = calibration_data.get("weights_pid", {})
+    selected = base.get("gains_800g", {}) if weight_g == 800.0 else {}
+    return (
+        float(selected.get("kp", base.get("kp", 1.0))),
+        float(selected.get("ki", base.get("ki", 0.005))),
+        float(selected.get("kd", base.get("kd", 0.0))),
+    )
+
+
+WEIGHTS_PID_KP, WEIGHTS_PID_KI, WEIGHTS_PID_KD = pid_gains_for_weight(0.0)
+
+
+def _load_moving_gravity_point(name: str, default: float) -> float:
+    """Read a motor command for a calibrated weight, with a safe fallback."""
+    try:
+        value = PID_CFG.get(name, default)
+        if isinstance(value, bool):
+            raise ValueError("Boolean values are not motor commands")
+        output = float(value)
+        if not math.isfinite(output) or not 0.0 <= output <= MOTORON_MAX:
+            raise ValueError("Motor command must be finite and within limits")
+        return output
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        warnings.warn(
+            f"Invalid weights_pid.{name}; using {default:g}",
+            RuntimeWarning, stacklevel=2,
+        )
+        return default
+
+
+WEIGHTS_GRAVITY_COMPENSATION_400G = _load_moving_gravity_point(
+    "gravity_compensation_400g", 137.5,
+)
+WEIGHTS_GRAVITY_COMPENSATION_800G = _load_moving_gravity_point(
+    "gravity_compensation_800g", 170.0,
+)
+
+
+def moving_gravity_compensation(weight_g: float) -> float:
+    """Interpolate the 400/800 g lift commands; zero weight needs no offset."""
+    weight = float(weight_g)
+    if not math.isfinite(weight) or weight < 0:
+        raise ValueError("Weight must be finite and nonnegative")
+    if weight == 0:
+        return 0.0
+    fraction = (weight - 400.0) / 400.0
+    output = (WEIGHTS_GRAVITY_COMPENSATION_400G
+              + fraction * (WEIGHTS_GRAVITY_COMPENSATION_800G - WEIGHTS_GRAVITY_COMPENSATION_400G))
+    return max(0.0, min(float(MOTORON_MAX), output))
+
+
+# Older calibration files may still provide a fixed initial controller value.
+WEIGHTS_PID_GRAVITY_OUTPUT = float(PID_CFG.get(
+    "gravity_output", moving_gravity_compensation(HOLDING_WEIGHT_G_DEFAULT),
+))
 WEIGHTS_PID_DEADBAND = float(PID_CFG.get("deadband_counts", 2.0))
 WEIGHTS_PID_MIN_OUTPUT = float(PID_CFG.get("min_output", 0.0))
 WEIGHTS_PID_I_LIM = float(PID_CFG.get("integral_limit_counts", 100.0))

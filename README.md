@@ -45,7 +45,7 @@ python device_controller/deviceController2.py
 ```
 Workflow:
 1) Zero the encoder in the UI before moving.
-2) Set weights top/bottom targets, tolerance, PD gains, speed, and Min Output as needed.
+2) Set weights top/bottom targets, tolerance, and speed as needed; edit PID profiles and Min Output in `calibration.json`.
 3) Jog manually with “▲/▼ Hold” buttons; run sequences via the sequence panel (cycles + dwell).
 4) Start/stop logging to write CSVs to `logs/`.(data_type: `time`, `LVDT_voltage`, `LVDT_mm`, `State`(moving_top, moving_bottom, stay_top, stay_bottom))
 5) E-STOP latches a coast; Reset E-STOP to resume.
@@ -54,11 +54,11 @@ Notes:
 - After editing config, restart the GUI and re-zero before moving.
 
 ## Configuration
-Defaults live in `device_controller/controller_app/config.py` and are overridden by `calibration.json` when present. The GUI “Save Targets” and “Save PD” buttons write back to `calibration.json`.
+Defaults live in `device_controller/controller_app/config.py` and are overridden by `calibration.json` when present. The GUI “Save Targets” button writes targets back to `calibration.json`; edit PID profiles in that file directly.
 
 Key settings:
-- `weights_pid`: `kp`, `kd` (Ki unused), `deadband_counts`, `min_output` (torque floor).
-- `weights_encoder`: `top_counts`, `bottom_counts`, `tolerance_counts`, `default_travel_counts`.
+- `weights_pid`: `kp`, `ki`, and `kd` apply to weights other than 800 g; `gains_800g` contains the gains for exactly 800 g. Edit these profiles in `calibration.json` and restart the GUI. This section also contains `deadband_counts`, `min_output`, and moving gravity compensation settings.
+- `weights_encoder`: `top_counts`, `bottom_counts`, `tolerance_counts`, `default_travel_counts`, and command limits: `pid_lift_speed_pct` (30% for non-800 g) and `pid_lift_speed_pct_800g` (50% for exactly 800 g). With the current 800 g startup weight, the GUI slider shows 50%.
 - Bottom protection to avoid unspooling:
   - `bottom_slow_speed_pct`: temporary speed when driving to bottom.
   - `bottom_retension_counts`: lift after hitting bottom (0 to disable).

@@ -449,14 +449,16 @@ class ControllerApp(tk.Tk):
         row1 = ttk.Frame(f)
         row1.pack(fill=tk.X, padx=8, pady=(4, 2))
 
-        ttk.Label(row1, text="Command limit %:").pack(side=tk.LEFT)
-        self.weights_speed_slider = ttk.Scale(row1, from_=5, to=100, orient=tk.HORIZONTAL, length=320, command=self._on_weight_speed)
         initial_speed = (
             self.weights_controller.speed_percent
             if self.weights_controller
-            else self.weights_manual.speed_percent
+            else config.PID_LIFT_SPEED_PCT
         )
+        self.var_weights_speed_limit = tk.StringVar(value=f"Command limit: {initial_speed:.1f}%")
+        ttk.Label(row1, textvariable=self.var_weights_speed_limit, width=21).pack(side=tk.LEFT)
+        self.weights_speed_slider = ttk.Scale(row1, from_=5, to=100, orient=tk.HORIZONTAL, length=320, command=self._on_weight_speed)
         self.weights_speed_slider.set(initial_speed)
+        self._on_weight_speed(str(initial_speed))
         self.weights_speed_slider.pack(side=tk.LEFT, padx=(6, 12))
         if not self.weights_controller and not self.weights_manual:
             self.weights_speed_slider.state(["disabled"])
@@ -694,6 +696,7 @@ class ControllerApp(tk.Tk):
 
     def _on_weight_speed(self, value: str):
         speed = float(value)
+        self.var_weights_speed_limit.set(f"Command limit: {speed:.1f}%")
         if self.weights_controller:
             self.weights_controller.set_speed_percent(speed)
         self.weights_manual.speed_percent = speed
@@ -800,13 +803,15 @@ class ControllerApp(tk.Tk):
         except ValueError:
             self.lbl_status.config(text="Invalid holding weight: enter a nonnegative weight within motor output limit")
             return False
+        speed_limit = (
+            config.pid_lift_speed_pct_for_weight(weight)
+            if weight != self._applied_holding_weight_g else None
+        )
         if self.weights_controller:
-            self.weights_controller.top_holding_speed_pct = percent
-            # Moving compensation: 400 g -> 137.5, 800 g -> 170.
-            # Keep the lower, separately calibrated output after arrival.
-            self.weights_controller.gravity_output = (
-                0.0 if weight == 0 else min(config.MOTORON_MAX, 105.0 + 0.08125 * weight)
-            )
+            self.weights_controller.set_weight_profile(weight, percent, speed_percent=speed_limit)
+        if speed_limit is not None:
+            self.weights_speed_slider.set(speed_limit)
+            self._on_weight_speed(str(speed_limit))
         self._applied_holding_weight_g = weight
         self.lbl_status.config(text=f"Holding weight: {weight:g} g | command: {int(percent * config.MOTORON_MAX / 100.0)}")
         return True
@@ -824,6 +829,8 @@ class ControllerApp(tk.Tk):
         if not self.weights_controller or self.manual_control.get():
             return
         target = int(self.weights_bottom_target.get())
+        if not self._apply_holding_weight():
+            return
         self._start_target_move(
             target,
             speed_override=config.WEIGHTS_BOTTOM_SLOW_SPEED_PCT,
