@@ -239,10 +239,44 @@ def fit_gkv_history(t, force, displacement, fit_mask, radius_mm=6.225,
     Returned parameters are ordered by tau1 <= tau2. Supply the loading history
     from relaxed contact; do not subtract a steady plateau as a force baseline.
     Use ``fit_gkv_hold`` when only a steady-force segment is available.
+
+    Signed force samples are retained, including pre-contact baseline noise.
+    Nonfinite displacement samples are excluded from the residual mask; force
+    and time must remain finite throughout the complete input history.
+    Diagnostic warnings flag bounds, weak or similar branches, extrapolated
+    time constants, poor fit, and initial mismatch. Force variation is modeled.
     """
-    force, dt, uniform = _history(t, force)
+    local_time = _hold_time(t)
+    force, dt, uniform = _history(local_time, force)
     displacement = np.asarray(displacement, dtype=float)
-    all_indices = np.flatnonzero(np.asarray(fit_mask, dtype=bool) & np.isfinite(displacement))
+    if force.shape != local_time.shape or not np.isfinite(force).all():
+        raise ValueError("Force must be a finite one-dimensional array matching time.")
+    if not np.any(force > 0):
+        raise ValueError("The force history must contain positive compression force.")
+    if displacement.shape != local_time.shape:
+        raise ValueError("Displacement must be a one-dimensional array matching time.")
+    fit_mask = np.asarray(fit_mask)
+    if fit_mask.dtype != np.dtype(bool) or fit_mask.shape != local_time.shape:
+        raise ValueError("fit_mask must be a Boolean array matching time.")
+    all_indices = np.flatnonzero(fit_mask & np.isfinite(displacement))
+    if all_indices.size < 10:
+        raise ValueError("At least ten finite selected displacement samples are required.")
+    observed_range = float(np.ptp(displacement[all_indices]))
+    if observed_range <= 1e-9:
+        raise ValueError("The selected displacement must vary by more than 1e-9 mm.")
+    if not np.isfinite(radius_mm) or radius_mm <= 0:
+        raise ValueError("radius_mm must be finite and positive.")
+    tau_bounds = np.asarray(tau_bounds, dtype=float)
+    if (tau_bounds.shape != (2,) or not np.isfinite(tau_bounds).all()
+            or not 0 < tau_bounds[0] < tau_bounds[1]):
+        raise ValueError("Use two finite, positive, increasing time-constant bounds.")
+    if (isinstance(max_starts, (bool, np.bool_))
+            or not isinstance(max_starts, (int, np.integer)) or not 1 <= max_starts <= 8):
+        raise ValueError("max_starts must be an integer from one through eight.")
+    if max_points is not None and (
+            isinstance(max_points, (bool, np.bool_))
+            or not isinstance(max_points, (int, np.integer)) or max_points < 10):
+        raise ValueError("max_points must be None or an integer of at least ten.")
     indices = all_indices
     if max_points is not None and indices.size > max_points:
         indices = indices[np.linspace(0, indices.size - 1, max_points).astype(int)]
@@ -271,7 +305,11 @@ def fit_gkv_history(t, force, displacement, fit_mask, radius_mm=6.225,
         results.append(least_squares(
             residual, np.r_[initial_c, log_tau], bounds=(lower, upper),
             loss="soft_l1", f_scale=0.03, x_scale="jac", max_nfev=350))
-    best = min((result for result in results if result.success), key=lambda result: result.cost)
+    converged = [result for result in results
+                 if result.success and np.isfinite(result.cost) and np.isfinite(result.x).all()]
+    if not converged:
+        raise RuntimeError("No force-history fit converged; inspect the data and time-constant bounds.")
+    best = min(converged, key=lambda result: result.cost)
     order = np.argsort(best.x[3:])
     tau = np.exp(best.x[3:])[order]
     compliance = np.r_[best.x[0], best.x[1:3][order]] * y_scale / f_scale
@@ -279,11 +317,36 @@ def fit_gkv_history(t, force, displacement, fit_mask, radius_mm=6.225,
     params = dict(E0=float(moduli[0]), E1=float(moduli[1]), eta1=float(tau[0] * moduli[1]),
                   E2=float(moduli[2]), eta2=float(tau[1] * moduli[2]))
     prediction = simulate_gkv_history(t, force, **params, radius_mm=radius_mm)
-    error = prediction[all_indices] - displacement[all_indices]
+    error = displacement[all_indices] - prediction[all_indices]
+    rmse = float(np.sqrt(np.mean(error**2)))
     ss_total = float(np.sum((displacement[all_indices] - np.mean(displacement[all_indices]))**2))
+    r2 = float(1 - np.sum(error**2) / ss_total)
+    diagnostics = dict(
+        mean_force_n=float(np.mean(force)), initial_residual_mm=float(error[0]),
+        max_abs_residual_mm=float(np.max(np.abs(error))),
+        n_fit_points=int(all_indices.size), n_optimization_points=int(indices.size),
+        n_starts_converged=len(converged), nfev=int(best.nfev),
+        optimizer_message=str(best.message))
+    warnings = []
+    log_distance = np.minimum(np.log(tau) - log_low, log_high - np.log(tau))
+    for branch in np.flatnonzero(log_distance <= 0.01 * (log_high - log_low)):
+        warnings.append(f"tau{branch + 1} is near a bound; inspect time-constant sensitivity.")
+    branch_response = _states(force, dt, tau, uniform) * compliance[1:]
+    contribution = np.ptp(branch_response[all_indices], axis=0)
+    for branch in np.flatnonzero(contribution <= max(1e-9, 0.01 * np.sum(contribution))):
+        warnings.append(f"Branch {branch + 1} contributes negligible displacement; its tau is poorly constrained.")
+    if tau[1] / tau[0] < 1.5:
+        warnings.append("The two time constants are close; separate branches may not be resolved.")
+    if np.any(tau > local_time[-1]):
+        warnings.append("A time constant exceeds the supplied history duration; inspect parameter sensitivity.")
+    if abs(error[0]) > max(5 * rmse, 0.05 * observed_range):
+        warnings.append("The initial residual is large; inspect the contact baseline and relaxed-start assumption.")
+    if r2 < 0.9:
+        warnings.append("R-squared is below 0.9; inspect residuals before interpreting material parameters.")
+    if len(converged) < max_starts:
+        warnings.append(f"Only {len(converged)} of {max_starts} optimization starts converged.")
     return {
         "parameters": params, "prediction": prediction,
         "tau1": float(tau[0]), "tau2": float(tau[1]),
-        "rmse": float(np.sqrt(np.mean(error**2))),
-        "r2": float(1 - np.sum(error**2) / ss_total) if ss_total > 0 else np.nan,
+        "rmse": rmse, "r2": r2, "diagnostics": diagnostics, "warnings": warnings,
     }
