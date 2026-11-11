@@ -32,7 +32,7 @@
   },
   "weights_encoder": {
     "bottom_counts": 0,
-    "holding_weight_g": 800,
+    "holding_weight_g": 400,
     "pid_lift_speed_pct": 30.0,
     "pid_lift_speed_pct_800g": 55.0,
     "slow_min_scale": 0.95,
