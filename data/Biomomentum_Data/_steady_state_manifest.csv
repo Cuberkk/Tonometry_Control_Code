@@ -1,7 +1,7 @@
 file,source_txt,steady_state_segmentation,export_scope,export_start_s,export_end_s,original_start_s,original_last_sample_s,rows,duration_s,sampling_hz,force_std_n,force_peak_to_peak_n,position_sign,force_sign
-Creep_1.csv,data/Biomomentum_Data/txts/Creep_1.txt,False,full_load,0.0,61.2,0.0,61.195,12240,61.195,200.0,0.6667671889929226,8.9024,1.0,-1.0
-Creep_2.csv,data/Biomomentum_Data/txts/Creep_2.txt,False,full_load,0.0,61.300000000000004,0.0,61.295,12260,61.295,200.0,0.652180037717876,8.878124,1.0,-1.0
-Creep_3.csv,data/Biomomentum_Data/txts/Creep_3.txt,False,full_load,0.0,61.2,0.0,61.195,12240,61.195,200.0,0.6587936972943501,8.912805,1.0,-1.0
-Creep_4.csv,data/Biomomentum_Data/txts/Creep_4.txt,False,full_load,0.0,60.7,0.0,60.695,12140,60.695,200.0,0.7147084677487342,8.919740999999998,1.0,-1.0
-Creep_5.csv,data/Biomomentum_Data/txts/Creep_5.txt,False,full_load,0.0,60.7,0.0,60.695,12140,60.695,200.0,0.7116541051215588,8.916272999999999,1.0,-1.0
-Creep_6.csv,data/Biomomentum_Data/txts/Creep_6.txt,False,full_load,0.0,61.2,0.0,61.195,12240,61.195,200.0,0.6506926847158221,8.878124,1.0,-1.0
+Creep_1.csv,data/Biomomentum_Data/txts/Creep_1.txt,False,full_load,0.0,50.0,0.0,61.195,10000,49.995,200.0,0.7362900925103744,8.9024,1.0,-1.0
+Creep_2.csv,data/Biomomentum_Data/txts/Creep_2.txt,False,full_load,0.0,50.0,0.0,61.295,10000,49.995,200.0,0.7208937745784071,8.878124,1.0,-1.0
+Creep_3.csv,data/Biomomentum_Data/txts/Creep_3.txt,False,full_load,0.0,50.0,0.0,61.195,10000,49.995,200.0,0.7274066780475957,8.874656,1.0,-1.0
+Creep_4.csv,data/Biomomentum_Data/txts/Creep_4.txt,False,full_load,0.0,50.0,0.0,60.695,10000,49.995,200.0,0.7858730887761424,8.919740999999998,1.0,-1.0
+Creep_5.csv,data/Biomomentum_Data/txts/Creep_5.txt,False,full_load,0.0,50.0,0.0,60.695,10000,49.995,200.0,0.7825674073134035,8.912804999999999,1.0,-1.0
+Creep_6.csv,data/Biomomentum_Data/txts/Creep_6.txt,False,full_load,0.0,50.0,0.0,61.195,10000,49.995,200.0,0.7187013549732824,8.878124,1.0,-1.0
