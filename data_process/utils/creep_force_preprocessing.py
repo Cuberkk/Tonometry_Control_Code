@@ -82,15 +82,17 @@ def despike_raw_signal(time_s, values, *, window_s, threshold, n_sigma=6.,
     return cleaned, repaired
 
 
-def load_trial(trial_dir, dt=.005, baseline_s=.8, max_gap_s=.2,
+def load_trial(trial_dir, dt=.005, baseline_s=.15, max_gap_s=.2,
                force_axis="Fz", compression_sign=-1.0, displacement_sign=1.0,
                displacement_despike=None, force_despike=None):
     """Despike native LVDT data and linearly align both signals on one grid.
 
-    A single initial baseline is removed for the whole raw trial. Integer epoch
+    The initial baseline mean is removed for the whole raw trial. Integer epoch
     timestamps share an origin before conversion to seconds. Only overlapping
     acquisition time is retained; gaps larger than max_gap_s remain NaN.
     No bin averaging, median resampling or extrapolation is performed.
+    Set trial time zero at the first synchronized sample after baseline_s whose
+    baseline-corrected indentation exceeds 0.01 mm; retain earlier samples.
     """
     if not np.isfinite(dt) or dt <= 0 or not np.isfinite(baseline_s) or baseline_s <= 0:
         raise ValueError("dt and baseline_s must be finite and positive.")
@@ -127,8 +129,8 @@ def load_trial(trial_dir, dt=.005, baseline_s=.8, max_gap_s=.2,
     if displacement_despike is not None:
         clean_displacement, lvdt["displacement_spike"] = despike_raw_signal(
             lvdt.time_s, clean_displacement, **displacement_despike)
-    force_base = pd.Series(clean_force[force.time_s < baseline_s]).median()
-    displacement_base = pd.Series(clean_displacement[lvdt.time_s < baseline_s]).median()
+    force_base = pd.Series(clean_force[force.time_s < baseline_s]).mean()
+    displacement_base = pd.Series(clean_displacement[lvdt.time_s < baseline_s]).mean()
     if not np.isfinite([force_base, displacement_base]).all():
         raise ValueError(f"{directory}: The initial baseline contains no valid sensor samples.")
     force["force_before_despike_n"] = compression_sign * (force.force_raw_n - force_base)
@@ -160,7 +162,15 @@ def load_trial(trial_dir, dt=.005, baseline_s=.8, max_gap_s=.2,
     if displacement_despike is not None or force_despike is not None:
         synced["fit_valid"] &= ~synced.repaired_force & ~synced.repaired_displacement
     synced.reset_index(drop=True, inplace=True)
-    return {"force": force, "lvdt": lvdt, "sync": synced, "origin_ns": origin,
+    onset = synced.loc[(synced.time_s > baseline_s) & (synced.displacement_mm > .01), "time_s"]
+    if onset.empty:
+        raise ValueError(f"{directory}: No indentation above 0.01 mm after the initial baseline.")
+    time_zero_s = float(onset.iloc[0])
+    for frame in (force, lvdt, synced):
+        frame["time_s"] -= time_zero_s
+    return {"force": force, "lvdt": lvdt, "sync": synced,
+            "origin_ns": origin + int(round(time_zero_s * 1e9)),
+            "acquisition_origin_ns": origin, "time_zero_s": time_zero_s,
             "baseline": {"force_raw_n": float(force_base),
                          "displacement_raw_mm": float(displacement_base)}}
 
@@ -173,7 +183,8 @@ def detect_indentation_cycles(trial_dir, trial, *, method="auto", force_settings
     moving to top starts release. Force-only fallback estimates the interval,
     retaining a short pre-trigger and conservatively trimming its release edge.
     A malformed or incomplete existing sequence log raises rather than silently
-    substituting less precise force boundaries.
+    substituting less precise force boundaries. For a displacement-aligned trial,
+    replace only the first cycle onset with time zero, preserving later onsets.
     """
     if method not in {"auto", "sequence", "force"}:
         raise ValueError("Cycle detection method must be 'auto', 'sequence' or 'force'.")
@@ -226,6 +237,9 @@ def detect_indentation_cycles(trial_dir, trial, *, method="auto", force_settings
     if cycles.empty:
         raise ValueError(f"{trial_dir}: No complete indentation cycles were detected.")
     cycles.sort_values("onset_s", inplace=True, ignore_index=True)
+    if "time_zero_s" in trial:
+        cycles.loc[0, "onset_s"] = 0.
+        cycles.loc[0, "boundary_source"] = "displacement_threshold+" + cycles.loc[0, "boundary_source"]
     if (cycles.release_s <= cycles.onset_s).any():
         raise ValueError(f"{trial_dir}: A cycle ends before it starts; review boundary settings.")
     if np.any(cycles.onset_s.to_numpy()[1:] < cycles.release_s.to_numpy()[:-1]):
@@ -330,17 +344,21 @@ def segment_force_steady_state(sync, cycles, *, stability_window_s=.5,
     return cycles.assign(**{key: [row[key] for row in rows] for key in rows[0]})
 
 
-def extract_indentation_cycles(sync, cycles, sampling_hz=200., *, steady_only=False):
-    """Return exactly three columns on a continuous cycle-relative time grid.
+def extract_indentation_cycles(sync, cycles, sampling_hz=200., *, steady_only=False,
+                               time_origin_s=None):
+    """Return exactly three columns on a continuous time grid.
 
     Preserve the trial-wide force/displacement baseline, including residual
     indentation in later cycles. Reject gaps instead of dropping samples or
     interpolating across unsupported intervals. The release boundary is strict.
     With ``steady_only=True``, use the confirmed steady-force boundaries from
     ``segment_force_steady_state`` and set time zero at the first retained sample.
+    An explicit time_origin_s instead preserves a shared origin across cycles.
     """
     if not np.isfinite(sampling_hz) or sampling_hz <= 0:
         raise ValueError("sampling_hz must be finite and positive.")
+    if time_origin_s is not None and not np.isfinite(time_origin_s):
+        raise ValueError("time_origin_s must be finite when provided.")
     dt = 1. / sampling_hz
     if len(sync) < 2 or not np.allclose(np.diff(sync.time_s), dt, rtol=1e-7, atol=1e-10):
         raise ValueError(f"Synchronized timestamps must be spaced at {dt:g} s.")
@@ -358,7 +376,9 @@ def extract_indentation_cycles(sync, cycles, sampling_hz=200., *, steady_only=Fa
         if len(segment) < 2 or not np.isfinite(values).all():
             raise ValueError(f"Cycle {event.cycle}: Missing sensor values or fewer than two samples. "
                              "Review native sensor gaps before exporting.")
-        frame = pd.DataFrame({OUTPUT_COLUMNS[0]: np.arange(len(segment)) / sampling_hz,
+        time = (np.arange(len(segment)) / sampling_hz if time_origin_s is None
+                else segment.time_s.to_numpy(float) - time_origin_s)
+        frame = pd.DataFrame({OUTPUT_COLUMNS[0]: time,
                               OUTPUT_COLUMNS[1]: values[:, 0], OUTPUT_COLUMNS[2]: values[:, 1]})
         extracted.append((int(event.cycle), frame))
     return extracted
