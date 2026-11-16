@@ -406,38 +406,6 @@ def _hysteresis_intervals(values, on, off, debounce_bins):
     return intervals
 
 
-def flag_isolated_spikes(sync, phases, window_s=.2, threshold_mm=.12,
-                         max_duration_s=.06):
-    """Flag short displacement excursions within the same stable phase/cycle."""
-    result = pd.Series(False, index=sync.index, name="suspected_displacement_spike")
-    t = sync.time_s.to_numpy(float)
-    dt = float(np.median(np.diff(t)))
-    n_window = max(3, int(round(window_s / dt)))
-    if n_window % 2 == 0:
-        n_window += 1
-    h = sync.displacement_mm.where(sync.valid)
-    center = h.rolling(n_window, center=True, min_periods=3).median()
-    deviation = (h - center).abs()
-    local_mad = deviation.rolling(n_window, center=True, min_periods=3).median()
-    eligible = (phases.phase.isin(["stable_load", "recovery"]).to_numpy() &
-                sync.valid.to_numpy(bool) & np.isfinite(h.to_numpy()))
-    candidate = eligible & (deviation.to_numpy() > np.maximum(threshold_mm, 8 * local_mad.to_numpy()))
-    starts = np.flatnonzero(candidate & ~np.r_[False, candidate[:-1]])
-    ends = np.flatnonzero(candidate & ~np.r_[candidate[1:], False])
-    phase_values = phases.phase.to_numpy()
-    cycle_values = phases.cycle.to_numpy()
-    for start, end in zip(starts, ends):
-        short = (end - start + 1) * dt <= max_duration_s + 1e-9
-        bounded = start > 0 and end + 1 < len(sync)
-        if not short or not bounded or not eligible[start - 1] or not eligible[end + 1]:
-            continue
-        neighborhood = slice(start - 1, end + 2)
-        if (np.all(phase_values[neighborhood] == phase_values[start]) and
-                np.all(cycle_values[neighborhood] == cycle_values[start])):
-            result.iloc[start:end + 1] = True
-    return result
-
-
 def segment_cycles(sync, on_fraction=.2, off_fraction=.1, onset_fraction=.05,
                    ramp_fraction=.9, debounce_s=.1, min_loaded_s=5.,
                    smoothing_s=.1, plateau_guard_s=.8, stability_window_s=.5,
