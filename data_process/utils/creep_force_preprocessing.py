@@ -162,7 +162,7 @@ def load_trial(trial_dir, dt=.005, baseline_s=.15, max_gap_s=.2,
     if displacement_despike is not None or force_despike is not None:
         synced["fit_valid"] &= ~synced.repaired_force & ~synced.repaired_displacement
     synced.reset_index(drop=True, inplace=True)
-    onset = synced.loc[(synced.time_s > baseline_s) & (synced.displacement_mm > .01), "time_s"]
+    onset = synced.loc[(synced.time_s > baseline_s) & (synced.displacement_mm > .05), "time_s"]
     if onset.empty:
         raise ValueError(f"{directory}: No indentation above 0.01 mm after the initial baseline.")
     time_zero_s = float(onset.iloc[0])
