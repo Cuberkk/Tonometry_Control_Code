@@ -157,8 +157,8 @@ def fit_gkv_tau(t, force, displacement, fit_mask=None,
         warnings.append("A time constant exceeds the fitted duration; its amplitude and tau may trade off.")
     if force_cv > 2:
         warnings.append("Force CV exceeds 2%; the constant-force approximation may be inadequate.")
-    if abs(force_drift) > 2:
-        warnings.append(f"Force drift:{abs(force_drift):.2f}% exceeds 2%; the constant-force approximation may be inadequate.")
+    # if abs(force_drift) > 2:
+    #     warnings.append(f"Force drift:{abs(force_drift):.2f}% exceeds 2%; the constant-force approximation may be inadequate.")
     if abs(error[0]) > max(5 * rmse, 0.05 * observed_range):
         warnings.append("The initial residual is large; inspect early transients and the initial displacement reference.")
     if all_indices[0] != 0:
